@@ -213,7 +213,10 @@ class OtterAI:
         payload = {"userid": self._userid}
 
         data = {"otid": speech_id}
-        headers = {"x-csrftoken": self._cookies["csrftoken"]}
+        headers = {
+            "x-csrftoken": self._cookies["csrftoken"],
+            "referer": "https://otter.ai/",
+        }
         response = self._session.post(
             move_to_trash_bin_url, params=payload, headers=headers, data=data
         )
