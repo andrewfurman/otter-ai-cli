@@ -204,8 +204,8 @@ def test_speeches_list_success(runner, temp_config_dir):
         "status": 200,
         "data": {
             "speeches": [
-                {"otid": "abc123", "title": "Test Speech", "created_at": "2024-01-01"},
-                {"otid": "def456", "title": "Another Speech", "created_at": "2024-01-02"}
+                {"otid": "abc123", "title": "Test Speech", "created_at": 1704085200},
+                {"otid": "def456", "title": "Another Speech", "created_at": 1704171600}
             ]
         }
     }

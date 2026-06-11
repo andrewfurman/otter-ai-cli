@@ -36,6 +36,9 @@ def _format_timestamp(epoch: int, fmt: str = "%a %b %d, %Y @ %I:%M%p ET") -> str
     except ImportError:
         # Python < 3.9 fallback: assume UTC-5
         dt = datetime.fromtimestamp(epoch, tz=timezone(timedelta(hours=-5)))
+    except (TypeError, ValueError, OSError):
+        # Not an epoch number; show the raw value rather than crash the listing
+        return str(epoch)
     return dt.strftime(fmt)
 
 
