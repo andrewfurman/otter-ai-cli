@@ -1,7 +1,7 @@
 //! Live tests against the real Otter.ai API, gated on credentials in the
 //! environment like the Python suite (OTTERAI_USERNAME / OTTERAI_PASSWORD).
 
-use otterai::Client;
+use otter::Client;
 
 fn live_client() -> Option<Client> {
     let (Ok(username), Ok(password)) = (

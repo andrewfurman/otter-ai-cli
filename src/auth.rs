@@ -1,6 +1,6 @@
 use std::io::{self, BufRead, IsTerminal, Write};
 
-use otterai::{config, Client};
+use otter::{config, Client};
 
 use crate::util::{api, die, fail, print_json, result_repr};
 

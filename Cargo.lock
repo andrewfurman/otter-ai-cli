@@ -785,17 +785,9 @@ dependencies = [
  "chrono",
  "chrono-tz",
  "clap",
- "otterai",
- "rpassword",
- "serde_json",
-]
-
-[[package]]
-name = "otterai"
-version = "0.1.0"
-dependencies = [
  "dirs",
  "reqwest",
+ "rpassword",
  "serde",
  "serde_json",
  "tempfile",
