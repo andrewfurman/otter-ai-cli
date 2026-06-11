@@ -13,7 +13,7 @@ Unofficial CLI and API client for [otter.ai](http://otter.ai), written in Rust.
 | `Cargo.toml` | The Rust package manifest — name, version, and dependency list. Rust's equivalent of `package.json` / `pyproject.toml`. Edited by hand. |
 | `Cargo.lock` | The exact resolved version of every dependency (and their dependencies), so every build uses identical code. Equivalent of `package-lock.json` / `uv.lock`. Managed by cargo — never edited by hand, committed on purpose. |
 | `.github/workflows/ci.yml` | Continuous integration: on every push/PR, GitHub runs format check, lint, and tests on a fresh VM. (The `.github/workflows/` folder name is mandated by GitHub Actions.) |
-| `CLI_GUIDE.txt` | Quick plain-text command reference. |
+| `AGENTS.md` | Context file for AI coding agents (the [AGENTS.md standard](https://agents.md)): build/test commands and the non-obvious gotchas. |
 | `LICENSE` | MIT, inherited from the upstream Python project this descends from ([gmchad/otterai-api](https://github.com/gmchad/otterai-api)) — MIT requires the notice to stay in derivative work. Note GitHub has **no** default license: without this file the code would be all-rights-reserved. |
 
 ## Contents
