@@ -23,7 +23,7 @@ from datetime import datetime, timedelta, timezone
 import click
 
 from .config import clear_credentials, get_config_path, load_credentials, save_credentials
-from .otterai import OtterAI, OtterAIException
+from otterai import OtterAI, OtterAIException
 
 
 def _format_timestamp(epoch: int, fmt: str = "%a %b %d, %Y @ %I:%M%p ET") -> str:

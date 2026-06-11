@@ -1,6 +1,12 @@
-# otterai-api
+# otter-ai-cli
 
-Unofficial Python API for [otter.ai](http://otter.ai)
+Unofficial API client and CLI for [otter.ai](http://otter.ai)
+
+## Repository layout
+
+-   `python-api/` — the `otterai` Python package (API client)
+-   `python-cli/` — the `otterai_cli` Python package (the `otter` command)
+-   `rust-cli/` — Rust port of the CLI, in progress ([#2](https://github.com/andrewfurman/otter-ai-cli/issues/2)); Python and Rust are both supported for now, long-term this becomes a Rust-only CLI
 
 ## Contents
 

@@ -7,8 +7,8 @@ from unittest.mock import MagicMock, patch
 import pytest
 from click.testing import CliRunner
 
-from otterai.cli import main
-from otterai import config
+from otterai_cli.cli import main
+from otterai_cli import config
 
 
 @pytest.fixture
@@ -155,7 +155,7 @@ def test_login_success(runner, temp_config_dir):
         "data": {"email": "test@example.com", "userid": "123"}
     }
 
-    with patch("otterai.cli.OtterAI", return_value=mock_client):
+    with patch("otterai_cli.cli.OtterAI", return_value=mock_client):
         result = runner.invoke(main, ["login"], input="test@example.com\ntestpass\n")
 
     assert result.exit_code == 0
@@ -167,7 +167,7 @@ def test_login_failure(runner, temp_config_dir):
     mock_client = MagicMock()
     mock_client.login.return_value = {"status": 401, "data": {"error": "Invalid credentials"}}
 
-    with patch("otterai.cli.OtterAI", return_value=mock_client):
+    with patch("otterai_cli.cli.OtterAI", return_value=mock_client):
         result = runner.invoke(main, ["login"], input="test@example.com\nbadpass\n")
 
     assert result.exit_code == 1
@@ -210,7 +210,7 @@ def test_speeches_list_success(runner, temp_config_dir):
         }
     }
 
-    with patch("otterai.cli.OtterAI", return_value=mock_client):
+    with patch("otterai_cli.cli.OtterAI", return_value=mock_client):
         result = runner.invoke(main, ["speeches", "list"])
 
     assert result.exit_code == 0
@@ -229,7 +229,7 @@ def test_speeches_list_json_output(runner, temp_config_dir):
         "data": {"speeches": [{"otid": "abc123", "title": "Test"}]}
     }
 
-    with patch("otterai.cli.OtterAI", return_value=mock_client):
+    with patch("otterai_cli.cli.OtterAI", return_value=mock_client):
         result = runner.invoke(main, ["speeches", "list", "--json"])
 
     assert result.exit_code == 0
@@ -259,7 +259,7 @@ def test_speakers_list_success(runner, temp_config_dir):
         }
     }
 
-    with patch("otterai.cli.OtterAI", return_value=mock_client):
+    with patch("otterai_cli.cli.OtterAI", return_value=mock_client):
         result = runner.invoke(main, ["speakers", "list"])
 
     assert result.exit_code == 0
@@ -293,7 +293,7 @@ def test_speakers_tag_list_segments(runner, temp_config_dir):
         }
     }
 
-    with patch("otterai.cli.OtterAI", return_value=mock_client):
+    with patch("otterai_cli.cli.OtterAI", return_value=mock_client):
         result = runner.invoke(main, ["speakers", "tag", "speech123", "s1"])
 
     assert result.exit_code == 0
@@ -323,7 +323,7 @@ def test_folders_list_success(runner, temp_config_dir):
         }
     }
 
-    with patch("otterai.cli.OtterAI", return_value=mock_client):
+    with patch("otterai_cli.cli.OtterAI", return_value=mock_client):
         result = runner.invoke(main, ["folders", "list"])
 
     assert result.exit_code == 0
@@ -344,7 +344,7 @@ def test_folders_create_success(runner, temp_config_dir):
         }
     }
 
-    with patch("otterai.cli.OtterAI", return_value=mock_client):
+    with patch("otterai_cli.cli.OtterAI", return_value=mock_client):
         result = runner.invoke(main, ["folders", "create", "New Folder"])
 
     assert result.exit_code == 0
@@ -371,7 +371,7 @@ def test_groups_list_success(runner, temp_config_dir):
         ]
     }
 
-    with patch("otterai.cli.OtterAI", return_value=mock_client):
+    with patch("otterai_cli.cli.OtterAI", return_value=mock_client):
         result = runner.invoke(main, ["groups", "list"])
 
     assert result.exit_code == 0

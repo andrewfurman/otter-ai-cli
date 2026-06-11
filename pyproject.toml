@@ -1,7 +1,11 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
 [project]
 name = "otterai-api"
 version = "0.1.0"
-description = "Add your description here"
+description = "Unofficial Otter.ai API client and CLI"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
@@ -12,7 +16,14 @@ dependencies = [
 ]
 
 [project.scripts]
-otter = "otterai.cli:main"
+otter = "otterai_cli.cli:main"
 
 [project.optional-dependencies]
 dev = ["pytest", "pytest-cov", "black"]
+
+[tool.setuptools]
+packages = ["otterai", "otterai_cli"]
+
+[tool.setuptools.package-dir]
+otterai = "python-api/otterai"
+otterai_cli = "python-cli/otterai_cli"
