@@ -1,16 +1,16 @@
-.PHONY: init-dev format test
+.PHONY: build install test fmt lint
 
-init-dev:
-	uv venv || true
-	uv pip install .[dev]
+build:
+	cargo build --release --manifest-path rust-cli/Cargo.toml
 
-format:
-	uv run black .
+install:
+	cargo install --path rust-cli/otter
 
 test:
-	rm -f cov.xml ||:
-	uv run pytest -s --cov=otterai --cov=otterai_cli \
-		--cov-report=lcov:lcov.info \
-		--cov-report=xml:cov.xml \
-		tests/
-	rm -f lcov.info .coverage ||:
+	cargo test --manifest-path rust-cli/Cargo.toml
+
+fmt:
+	cargo fmt --all --manifest-path rust-cli/Cargo.toml
+
+lint:
+	cargo clippy --all-targets --manifest-path rust-cli/Cargo.toml

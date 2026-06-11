@@ -2,9 +2,9 @@
 OTTER.AI CLI GUIDE
 ==================
 
-INSTALLATION (from PR branch)
------------------------------
-pip install git+https://github.com/andrewfurman/otterai-api.git@feature/cli
+INSTALLATION
+------------
+cargo install --path rust-cli/otter   (from a clone of this repo)
 
 
 SETUP
