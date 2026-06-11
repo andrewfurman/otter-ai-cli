@@ -1,4 +1,7 @@
-name: Test
+# Continuous integration: on every push and pull request, GitHub runs this on
+# a fresh Ubuntu VM. (The .github/workflows/ folder name is mandated by GitHub
+# Actions and cannot be renamed.)
+name: CI (format, lint, tests)
 
 on:
     push:
@@ -20,12 +23,15 @@ jobs:
               with:
                   components: rustfmt, clippy
 
+            # Fails if the code isn't rustfmt-formatted
             - name: Check formatting
               run: cargo fmt --all --check
 
+            # Linter; any warning fails the build
             - name: Lint
               run: cargo clippy --all-targets -- -D warnings
 
-            # Live API tests skip themselves when OTTERAI_USERNAME/PASSWORD are unset
+            # Unit tests. The live API tests (tests/live.rs) skip themselves
+            # here because OTTERAI_USERNAME/OTTERAI_PASSWORD are not set in CI.
             - name: Run tests
               run: cargo test

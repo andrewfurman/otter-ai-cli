@@ -1,9 +1,21 @@
-[workspace]
-resolver = "2"
-members = ["otterai", "otter"]
-
-[workspace.package]
+[package]
+name = "otter"
+description = "Unofficial Otter.ai CLI"
 version = "0.1.0"
 edition = "2021"
 license = "MIT"
 repository = "https://github.com/andrewfurman/otter-ai-cli"
+
+[dependencies]
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "cookies", "multipart", "rustls-tls"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+thiserror = "2"
+dirs = "6"
+clap = { version = "4", features = ["derive"] }
+rpassword = "7"
+chrono = { version = "0.4", default-features = false, features = ["alloc"] }
+chrono-tz = "0.10"
+
+[dev-dependencies]
+tempfile = "3"

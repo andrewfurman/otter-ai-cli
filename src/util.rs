@@ -1,5 +1,5 @@
 use chrono::TimeZone;
-use otterai::{ApiResponse, Client, Error};
+use otter::{ApiResponse, Client, Error};
 use serde_json::Value;
 
 /// Render like Python's `json.dumps(data, indent=2)`, including its

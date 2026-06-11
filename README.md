@@ -6,8 +6,15 @@ Unofficial CLI and API client for [otter.ai](http://otter.ai), written in Rust.
 
 ## Repository layout
 
--   `otter/` — the `otter` CLI binary crate
--   `otterai/` — the `otterai` library crate (the API client the CLI is built on; `src/client.rs` documents every known endpoint)
+| Path | What it is |
+| --- | --- |
+| `src/` | All the source. `main.rs` + the per-command modules are the CLI; `client.rs` is the API client and documents every known Otter.ai endpoint; `config.rs` handles credentials. |
+| `tests/live.rs` | Integration tests against the real Otter.ai API; they skip themselves unless `OTTERAI_USERNAME`/`OTTERAI_PASSWORD` are set. |
+| `Cargo.toml` | The Rust package manifest — name, version, and dependency list. Rust's equivalent of `package.json` / `pyproject.toml`. Edited by hand. |
+| `Cargo.lock` | The exact resolved version of every dependency (and their dependencies), so every build uses identical code. Equivalent of `package-lock.json` / `uv.lock`. Managed by cargo — never edited by hand, committed on purpose. |
+| `.github/workflows/ci.yml` | Continuous integration: on every push/PR, GitHub runs format check, lint, and tests on a fresh VM. (The `.github/workflows/` folder name is mandated by GitHub Actions.) |
+| `CLI_GUIDE.txt` | Quick plain-text command reference. |
+| `LICENSE` | MIT, inherited from the upstream Python project this descends from ([gmchad/otterai-api](https://github.com/gmchad/otterai-api)) — MIT requires the notice to stay in derivative work. Note GitHub has **no** default license: without this file the code would be all-rights-reserved. |
 
 ## Contents
 
@@ -17,10 +24,10 @@ Unofficial CLI and API client for [otter.ai](http://otter.ai), written in Rust.
 
 ## Installation
 
-With a [Rust toolchain](https://rustup.rs) installed:
+With a [Rust toolchain](https://rustup.rs) installed, from a clone of this repo:
 
 ```bash
-cargo install --path otter
+cargo install --path .
 ```
 
 or build without installing (binary at `target/release/otter`):
@@ -152,13 +159,14 @@ otter speakers list --json
 
 ## Library
 
-The API client lives in the `otterai` crate. Every method mirrors an Otter.ai
+The API client lives in `src/client.rs`. Every method mirrors an Otter.ai
 endpoint and returns an `ApiResponse { status, data }`, where `data` is the raw
 JSON — the API is unofficial and drifts, so the client stays schema-light on
-purpose.
+purpose. If you ever need to build an integration in another language, this
+file is the endpoint reference.
 
 ```rust
-use otterai::Client;
+use otter::Client;
 
 let mut client = Client::new()?;
 client.login("USERNAME", "PASSWORD")?;
