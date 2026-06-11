@@ -4,7 +4,7 @@ OTTER.AI CLI GUIDE
 
 INSTALLATION
 ------------
-cargo install --path rust-cli/otter   (from a clone of this repo)
+cargo install --path otter   (from a clone of this repo)
 
 
 SETUP
