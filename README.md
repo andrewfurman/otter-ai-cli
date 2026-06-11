@@ -6,9 +6,8 @@ Unofficial CLI and API client for [otter.ai](http://otter.ai), written in Rust.
 
 ## Repository layout
 
--   `rust-cli/` — Cargo workspace
-    -   `rust-cli/otterai/` — the `otterai` library crate (API client)
-    -   `rust-cli/otter/` — the `otter` CLI binary crate
+-   `otter/` — the `otter` CLI binary crate
+-   `otterai/` — the `otterai` library crate (the API client the CLI is built on; `src/client.rs` documents every known endpoint)
 
 ## Contents
 
@@ -21,13 +20,13 @@ Unofficial CLI and API client for [otter.ai](http://otter.ai), written in Rust.
 With a [Rust toolchain](https://rustup.rs) installed:
 
 ```bash
-cargo install --path rust-cli/otter
+cargo install --path otter
 ```
 
-or build without installing (binary at `rust-cli/target/release/otter`):
+or build without installing (binary at `target/release/otter`):
 
 ```bash
-cargo build --release --manifest-path rust-cli/Cargo.toml
+cargo build --release
 ```
 
 ## CLI
@@ -153,10 +152,10 @@ otter speakers list --json
 
 ## Library
 
-The API client lives in the `otterai` crate (`rust-cli/otterai`). Every method
-mirrors an Otter.ai endpoint and returns an `ApiResponse { status, data }`,
-where `data` is the raw JSON — the API is unofficial and drifts, so the client
-stays schema-light on purpose.
+The API client lives in the `otterai` crate. Every method mirrors an Otter.ai
+endpoint and returns an `ApiResponse { status, data }`, where `data` is the raw
+JSON — the API is unofficial and drifts, so the client stays schema-light on
+purpose.
 
 ```rust
 use otterai::Client;
@@ -172,5 +171,5 @@ for speech in speeches.data["speeches"].as_array().unwrap_or(&vec![]) {
 Live API tests are gated on `OTTERAI_USERNAME`/`OTTERAI_PASSWORD` being set:
 
 ```bash
-cargo test --manifest-path rust-cli/Cargo.toml
+cargo test
 ```

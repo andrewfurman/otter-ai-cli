@@ -15,11 +15,17 @@ jobs:
             - name: Checkout code
               uses: actions/checkout@v4
 
-            - name: Set up uv
-              uses: astral-sh/setup-uv@v7
+            - name: Set up Rust
+              uses: dtolnay/rust-toolchain@stable
+              with:
+                  components: rustfmt, clippy
 
-            - name: Install dependencies
-              run: make init-dev
+            - name: Check formatting
+              run: cargo fmt --all --check
 
+            - name: Lint
+              run: cargo clippy --all-targets -- -D warnings
+
+            # Live API tests skip themselves when OTTERAI_USERNAME/PASSWORD are unset
             - name: Run tests
-              run: make test
+              run: cargo test
