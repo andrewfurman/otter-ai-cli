@@ -1,0 +1,12 @@
+[package]
+name = "otter"
+description = "Otter.ai CLI (Rust port)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+otterai = { path = "../otterai" }
+clap = { version = "4", features = ["derive"] }
+rpassword = "7"
