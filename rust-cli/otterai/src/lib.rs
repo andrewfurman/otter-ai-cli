@@ -3,4 +3,4 @@
 pub mod client;
 pub mod config;
 
-pub use client::{Client, Error, LoginData};
+pub use client::{ApiResponse, Client, Error};

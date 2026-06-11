@@ -170,6 +170,8 @@ class OtterAI:
             "language": "en",
             "country": "us",
             "userid": self._userid,
+            # Required since mid-2026; the API rejects the finish call without it
+            "appid": "otter-web",
         }
         response = self._session.get(finish_speech_upload, params=payload)
 

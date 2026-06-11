@@ -6,7 +6,7 @@ Unofficial API client and CLI for [otter.ai](http://otter.ai)
 
 -   `python-api/` — the `otterai` Python package (API client)
 -   `python-cli/` — the `otterai_cli` Python package (the `otter` command)
--   `rust-cli/` — Rust port of the CLI, in progress ([#2](https://github.com/andrewfurman/otter-ai-cli/issues/2)); Python and Rust are both supported for now, long-term this becomes a Rust-only CLI
+-   `rust-cli/` — Rust port of the CLI ([#2](https://github.com/andrewfurman/otter-ai-cli/issues/2)), at full command parity with the Python CLI; Python and Rust are both supported for now, long-term this becomes a Rust-only CLI. Build with `cargo build --release` in `rust-cli/` (binary at `rust-cli/target/release/otter`), or install with `cargo install --path rust-cli/otter`.
 
 ## Contents
 
