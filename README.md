@@ -1,6 +1,6 @@
 # otter-ai-cli
 
-Unofficial CLI and API client for [otter.ai](http://otter.ai), written in Rust.
+Unofficial CLI for [otter.ai](http://otter.ai), written in Rust.
 
 > Originally a Python project (forked from [gmchad/otterai-api](https://github.com/gmchad/otterai-api)), rewritten in Rust at full parity. The final Python implementation is preserved at the [`python-final`](https://github.com/andrewfurman/otter-ai-cli/releases/tag/python-final) tag.
 
