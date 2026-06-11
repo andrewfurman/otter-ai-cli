@@ -158,7 +158,7 @@ def speeches():
 
 
 @speeches.command("list")
-@click.option("--folder", "-f", default=0, help="Folder ID or name (default: 0 = all)")
+@click.option("--folder", "-f", default="0", help="Folder ID or name (default: 0 = all)")
 @click.option("--page-size", "-n", default=45, help="Number of results (default: 45)")
 @click.option(
     "--source",
@@ -522,7 +522,8 @@ def speakers_list(as_json: bool):
     click.echo(f"Found {len(speakers_data)} speakers:\n")
     for speaker in speakers_data:
         name = speaker.get("speaker_name", "Unknown")
-        speaker_id = speaker.get("speaker_id", "")
+        # The API now returns "id"; older payloads used "speaker_id"
+        speaker_id = speaker.get("speaker_id") or speaker.get("id", "")
         click.echo(f"  {speaker_id}  {name}")
 
 
@@ -579,7 +580,7 @@ def speakers_tag(speech_id: str, speaker_id: str, transcript_uuid: str, tag_all:
 
     speaker_name = None
     for s in speakers_result["data"].get("speakers", []):
-        if str(s.get("speaker_id")) == str(speaker_id):
+        if str(s.get("speaker_id") or s.get("id")) == str(speaker_id):
             speaker_name = s.get("speaker_name")
             break
 
