@@ -1,50 +1,36 @@
 # otter-ai-cli
 
-Unofficial API client and CLI for [otter.ai](http://otter.ai)
+Unofficial CLI and API client for [otter.ai](http://otter.ai), written in Rust.
+
+> Originally a Python project (forked from [gmchad/otterai-api](https://github.com/gmchad/otterai-api)), rewritten in Rust at full parity. The final Python implementation is preserved at the [`python-final`](https://github.com/andrewfurman/otter-ai-cli/releases/tag/python-final) tag.
 
 ## Repository layout
 
--   `python-api/` — the `otterai` Python package (API client)
--   `python-cli/` — the `otterai_cli` Python package (the `otter` command)
--   `rust-cli/` — Rust port of the CLI ([#2](https://github.com/andrewfurman/otter-ai-cli/issues/2)), at full command parity with the Python CLI; Python and Rust are both supported for now, long-term this becomes a Rust-only CLI. Build with `cargo build --release` in `rust-cli/` (binary at `rust-cli/target/release/otter`), or install with `cargo install --path rust-cli/otter`.
+-   `rust-cli/` — Cargo workspace
+    -   `rust-cli/otterai/` — the `otterai` library crate (API client)
+    -   `rust-cli/otter/` — the `otter` CLI binary crate
 
 ## Contents
 
 -   [Installation](#installation)
--   [Setup](#setup)
 -   [CLI](#cli)
--   [APIs](#apis)
-    -   [User](#user)
-    -   [Speeches](#speeches)
-    -   [Speakers](#speakers)
-    -   [Folders](#folders)
-    -   [Groups](#groups)
-    -   [Notifications](#notifications)
--   [Exceptions](#exceptions)
+-   [Library](#library)
 
 ## Installation
 
-`pip install .`
-
-or in a virtual environment
+With a [Rust toolchain](https://rustup.rs) installed:
 
 ```bash
-python3 -m venv env
-source env/bin/activate
-pip install .
+cargo install --path rust-cli/otter
 ```
 
-## Setup
+or build without installing (binary at `rust-cli/target/release/otter`):
 
-```python
-from otterai import OtterAI
-otter = OtterAI()
-otter.login('USERNAME', 'PASSWORD')
+```bash
+cargo build --release --manifest-path rust-cli/Cargo.toml
 ```
 
 ## CLI
-
-A command-line interface is also available for interacting with Otter.ai.
 
 ### Authentication
 
@@ -123,6 +109,11 @@ otter speakers list
 
 # Create a new speaker
 otter speakers create "Speaker Name"
+
+# Tag a speaker on transcript segments
+otter speakers tag SPEECH_ID SPEAKER_ID            # list segments
+otter speakers tag SPEECH_ID SPEAKER_ID -t UUID    # tag one segment
+otter speakers tag SPEECH_ID SPEAKER_ID --all      # tag all segments
 ```
 
 ### Folders and Groups
@@ -160,113 +151,26 @@ otter speeches list --json
 otter speakers list --json
 ```
 
-## APIs
+## Library
 
-### User
+The API client lives in the `otterai` crate (`rust-cli/otterai`). Every method
+mirrors an Otter.ai endpoint and returns an `ApiResponse { status, data }`,
+where `data` is the raw JSON — the API is unofficial and drifts, so the client
+stays schema-light on purpose.
 
-Get user specific data
+```rust
+use otterai::Client;
 
-```python
-otter.get_user()
+let mut client = Client::new()?;
+client.login("USERNAME", "PASSWORD")?;
+let speeches = client.get_speeches("0", 45, "owned")?;
+for speech in speeches.data["speeches"].as_array().unwrap_or(&vec![]) {
+    println!("{}", speech["title"]);
+}
 ```
 
-### Speeches
+Live API tests are gated on `OTTERAI_USERNAME`/`OTTERAI_PASSWORD` being set:
 
-Get all speeches
-
-**optional parameters**: folder, page_size, source
-
-```python
-otter.get_speeches()
-```
-
-Get speech by id
-
-```python
-otter.get_speech(SPEECH_ID)
-```
-
-Query a speech
-
-```python
-otter.query_speech(QUERY, SPEECH_ID)
-```
-
-Upload a speech
-
-**optional parameters**: content_type (default audio/mp4)
-
-```python
-otter.upload_speech(FILE_NAME)
-```
-
-Download a speech
-
-**optional parameters**: filename (defualt id), format (default: all available (txt,pdf,mp3,docx,srt) as zip file)
-
-```python
-otter.download_speech(SPEECH_ID, FILE_NAME)
-```
-
-Move a speech to trash
-
-```python
-otter.move_to_trash_bin(SPEECH_ID)
-```
-
-#### TODO
-
-Start a live speech
-
-### Speakers
-
-Get all speakers
-
-```python
-otter.get_speakers()
-```
-
-Create a speaker
-
-```python
-otter.create_speaker(SPEAKER_NAME)
-```
-
-#### TODO
-
-Assign a speaker to speech transcript
-
-### Folders
-
-Get all folders
-
-```python
-otter.get_folders()
-```
-
-### Groups
-
-Get all groups
-
-```python
-otter.list_groups()
-```
-
-### Notifications
-
-Get notification settings
-
-```python
-otter.get_notification_settings()
-```
-
-## Exceptions
-
-```python
-from otterai import OtterAIException
-
-try:
- ...
-except OtterAIException as e:
- ...
+```bash
+cargo test --manifest-path rust-cli/Cargo.toml
 ```
