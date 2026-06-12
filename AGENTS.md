@@ -35,6 +35,22 @@ mutate real meetings.
   `finish_speech_upload` started requiring `appid=otter-web`; the speakers
   payload renamed `speaker_id` to `id`. When a request 400s, suspect drift and
   compare with what the otter.ai web app sends.
+- Observed Otter rate limit, June 2026: the CLI currently logs in on every
+  authenticated command (`auth::authenticated_client()` calls `/login` before
+  the requested endpoint), so scripts with many separate `otter ...` commands
+  can hit a **login** rate limit even when each downstream operation is valid.
+  During one cleanup run, a sequence of roughly 12-15 authenticated CLI
+  invocations in a couple of minutes succeeded through eight `speeches rename`
+  calls and one `speeches move`, then the next move failed with:
+  `Login failed: {'status': 429, 'data': {"status":"failed","message":"rate limited"}}`.
+  Treat that as an empirical threshold, not a documented API contract.
+- When automating real Otter data, batch what the CLI can batch (for example
+  `speeches move ID1 ID2 ID3 --folder FOLDER`) and add backoff between
+  separate authenticated commands. In the same June 2026 run, waiting about
+  2-3 minutes after the 429, then spacing subsequent moves by about 30 seconds,
+  allowed the remaining folder moves and a verification `speeches list` to
+  complete. A retry loop that sleeps 60-90 seconds on 429 is a reasonable
+  starting point.
 - `ApiResponse.data` is deliberately untyped (`serde_json::Value`) because of
   that drift — don't introduce strict response structs.
 - The project descends from gmchad/otterai-api (Python, MIT). The final Python
