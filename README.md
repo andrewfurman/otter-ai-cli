@@ -25,7 +25,7 @@ otter login
 otter speeches list --days 2
 ```
 
-Most commands take `--json` for scripts and agents. `otter --help` (and `otter <group> --help`) is the full command surface.
+Most commands take `--json` for scripts and agents. `speeches list` and `speeches search` accept `--speaker` to filter by speaker name or id. `otter --help` (and `otter <group> --help`) is the full command surface.
 
 CLI speech IDs are Otter **otid** values (from `otter speeches list`), not the internal `speech_id`.
 

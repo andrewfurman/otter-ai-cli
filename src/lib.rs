@@ -6,4 +6,4 @@
 pub mod client;
 pub mod config;
 
-pub use client::{ApiResponse, Client, Error};
+pub use client::{speaker_matches, ApiResponse, Client, Error};

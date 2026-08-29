@@ -66,6 +66,9 @@ enum SpeechesCommand {
         /// Only show speeches from the last N days
         #[arg(short, long)]
         days: Option<i64>,
+        /// Filter by speaker name (case-insensitive substring) or speaker id
+        #[arg(long)]
+        speaker: Option<String>,
         /// Output as JSON
         #[arg(long)]
         json: bool,
@@ -84,6 +87,9 @@ enum SpeechesCommand {
         /// Max results (default: 500)
         #[arg(short = 'n', long, default_value_t = 500)]
         size: u32,
+        /// Filter by speaker name (case-insensitive substring) or speaker id
+        #[arg(long)]
+        speaker: Option<String>,
         /// Output as JSON
         #[arg(long)]
         json: bool,
@@ -201,15 +207,17 @@ fn main() {
                 page_size,
                 source,
                 days,
+                speaker,
                 json,
-            } => speeches::list(folder, page_size, source, days, json),
+            } => speeches::list(folder, page_size, source, days, speaker, json),
             SpeechesCommand::Get { speech_id, json } => speeches::get(speech_id, json),
             SpeechesCommand::Search {
                 query,
                 speech_id,
                 size,
+                speaker,
                 json,
-            } => speeches::search(query, speech_id, size, json),
+            } => speeches::search(query, speech_id, size, speaker, json),
             SpeechesCommand::Rename { speech_id, title } => speeches::rename(speech_id, title),
             SpeechesCommand::Download {
                 speech_id,
@@ -250,5 +258,46 @@ fn main() {
             ConfigCommand::Show => auth::config_show(),
             ConfigCommand::Clear => auth::config_clear(),
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn list_and_search_accept_speaker_flag() {
+        let list = Cli::try_parse_from(["otter", "speeches", "list", "--speaker", "Alice"])
+            .expect("list --speaker should parse");
+        match list.command {
+            Command::Speeches(SpeechesCommand::List { speaker, .. }) => {
+                assert_eq!(speaker.as_deref(), Some("Alice"));
+            }
+            _ => panic!("expected speeches list"),
+        }
+
+        let search = Cli::try_parse_from([
+            "otter",
+            "speeches",
+            "search",
+            "hello",
+            "otid123",
+            "--speaker",
+            "42",
+        ])
+        .expect("search --speaker should parse");
+        match search.command {
+            Command::Speeches(SpeechesCommand::Search {
+                speaker,
+                query,
+                speech_id,
+                ..
+            }) => {
+                assert_eq!(query, "hello");
+                assert_eq!(speech_id, "otid123");
+                assert_eq!(speaker.as_deref(), Some("42"));
+            }
+            _ => panic!("expected speeches search"),
+        }
     }
 }

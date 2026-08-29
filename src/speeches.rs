@@ -1,6 +1,7 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use serde_json::Value;
+use otter::client::speaker_matches;
+use serde_json::{json, Value};
 
 use crate::auth::{authenticated_client, prompt};
 use crate::util::{
@@ -9,7 +10,14 @@ use crate::util::{
 };
 
 #[allow(clippy::too_many_arguments)]
-pub fn list(folder: String, page_size: u32, source: String, days: Option<i64>, as_json: bool) {
+pub fn list(
+    folder: String,
+    page_size: u32,
+    source: String,
+    days: Option<i64>,
+    speaker: Option<String>,
+    as_json: bool,
+) {
     let client = authenticated_client();
 
     let folder_id = if !folder.is_empty() && folder.chars().all(|c| c.is_ascii_digit()) {
@@ -40,6 +48,12 @@ pub fn list(folder: String, page_size: u32, source: String, days: Option<i64>, a
                 .cloned()
                 .collect();
             data["speeches"] = Value::Array(filtered);
+        }
+    }
+
+    if let Some(needle) = normalize_speaker(speaker) {
+        if let Some(speeches) = data["speeches"].as_array() {
+            data["speeches"] = Value::Array(filter_speeches_by_speaker(speeches, &needle));
         }
     }
 
@@ -164,16 +178,38 @@ pub fn get(speech_id: String, as_json: bool) {
     }
 }
 
-pub fn search(query: String, speech_id: String, size: u32, as_json: bool) {
+pub fn search(query: String, speech_id: String, size: u32, speaker: Option<String>, as_json: bool) {
     let client = authenticated_client();
-    let result = api(client.query_speech(&query, &speech_id, size));
-    if !result.ok() {
-        fail(format!("Search failed: {}", result_repr(&result)));
-    }
 
-    let data = &result.data;
+    let data = if let Some(needle) = normalize_speaker(speaker) {
+        // advanced_search may omit speaker fields; get_speech is the reliable path.
+        let result = api(client.get_speech(&speech_id));
+        if !result.ok() {
+            fail(format!("Search failed: {}", result_repr(&result)));
+        }
+        let payload = result.data;
+        let speech = &payload["speech"];
+        let transcripts = if truthy(&speech["transcripts"]) {
+            &speech["transcripts"]
+        } else {
+            &payload["transcripts"]
+        };
+        let segments = transcripts.as_array().cloned().unwrap_or_default();
+        let mut results = filter_segments_by_speaker_and_query(&segments, &needle, &query);
+        if results.len() > size as usize {
+            results.truncate(size as usize);
+        }
+        json!({ "results": results })
+    } else {
+        let result = api(client.query_speech(&query, &speech_id, size));
+        if !result.ok() {
+            fail(format!("Search failed: {}", result_repr(&result)));
+        }
+        result.data
+    };
+
     if as_json {
-        print_json(data);
+        print_json(&data);
         return;
     }
 
@@ -192,11 +228,16 @@ pub fn search(query: String, speech_id: String, size: u32, as_json: bool) {
                 let text = first_truthy(item, &["transcript", "text"]);
                 let start = first_truthy(item, &["start_time", "start"]);
                 let end = first_truthy(item, &["end_time", "end"]);
+                let speaker_name = value_str(&item["speaker_name"]);
                 let mut header = format!("[{}]", idx + 1);
                 if !start.is_empty() || !end.is_empty() {
                     let range = format!("{start}-{end}");
                     header.push(' ');
                     header.push_str(range.trim_matches('-'));
+                }
+                if !speaker_name.is_empty() {
+                    header.push(' ');
+                    header.push_str(&speaker_name);
                 }
                 println!("{header}");
                 if !text.is_empty() {
@@ -206,7 +247,7 @@ pub fn search(query: String, speech_id: String, size: u32, as_json: bool) {
             }
         }
         Some(_) => println!("No results found."),
-        None => print_json(data),
+        None => print_json(&data),
     }
 }
 
@@ -315,4 +356,112 @@ fn first_truthy(item: &Value, keys: &[&str]) -> String {
         }
     }
     String::new()
+}
+
+fn normalize_speaker(speaker: Option<String>) -> Option<String> {
+    speaker.and_then(|s| {
+        let trimmed = s.trim().to_string();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed)
+        }
+    })
+}
+
+fn filter_speeches_by_speaker(speeches: &[Value], needle: &str) -> Vec<Value> {
+    speeches
+        .iter()
+        .filter(|speech| {
+            speech["speakers"]
+                .as_array()
+                .map(|list| list.iter().any(|s| speaker_matches(s, needle)))
+                .unwrap_or(false)
+        })
+        .cloned()
+        .collect()
+}
+
+fn filter_segments_by_speaker_and_query(
+    segments: &[Value],
+    speaker: &str,
+    query: &str,
+) -> Vec<Value> {
+    let query_lc = query.to_lowercase();
+    segments
+        .iter()
+        .filter(|seg| {
+            if !speaker_matches(seg, speaker) {
+                return false;
+            }
+            let text = first_truthy(seg, &["transcript", "text"]);
+            text.to_lowercase().contains(&query_lc)
+        })
+        .cloned()
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn normalize_speaker_trims_and_drops_empty() {
+        assert_eq!(normalize_speaker(None), None);
+        assert_eq!(normalize_speaker(Some(String::new())), None);
+        assert_eq!(normalize_speaker(Some("   ".into())), None);
+        assert_eq!(
+            normalize_speaker(Some("  Alice  ".into())),
+            Some("Alice".into())
+        );
+    }
+
+    #[test]
+    fn filter_speeches_keeps_matching_speaker_name_or_id() {
+        let speeches = vec![
+            json!({
+                "title": "A",
+                "speakers": [{"id": 1, "speaker_name": "Alice Example"}]
+            }),
+            json!({
+                "title": "B",
+                "speakers": [{"id": 2, "speaker_name": "Bob"}]
+            }),
+            json!({
+                "title": "C",
+                "speakers": []
+            }),
+        ];
+
+        let by_name = filter_speeches_by_speaker(&speeches, "alice");
+        assert_eq!(by_name.len(), 1);
+        assert_eq!(by_name[0]["title"], "A");
+
+        let by_id = filter_speeches_by_speaker(&speeches, "2");
+        assert_eq!(by_id.len(), 1);
+        assert_eq!(by_id[0]["title"], "B");
+
+        assert!(filter_speeches_by_speaker(&speeches, "nobody").is_empty());
+    }
+
+    #[test]
+    fn filter_segments_requires_speaker_and_query() {
+        let segments = vec![
+            json!({"speaker_name": "Alice", "speaker_id": 1, "transcript": "hello world"}),
+            json!({"speaker_name": "Alice", "text": "goodbye"}),
+            json!({"speaker_name": "Bob", "transcript": "hello world"}),
+        ];
+
+        let hits = filter_segments_by_speaker_and_query(&segments, "Alice", "HELLO");
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0]["transcript"], "hello world");
+
+        let by_id = filter_segments_by_speaker_and_query(&segments, "1", "world");
+        assert_eq!(by_id.len(), 1);
+        assert_eq!(by_id[0]["speaker_name"], "Alice");
+
+        let none = filter_segments_by_speaker_and_query(&segments, "Bob", "goodbye");
+        assert!(none.is_empty());
+    }
 }

@@ -152,6 +152,9 @@ impl Client {
         handle_response(response)
     }
 
+    /// Search a speech via GET `advanced_search`.
+    /// Speaker filtering is applied client-side; Otter has no documented
+    /// list/search query parameter for speaker name or id.
     pub fn query_speech(
         &self,
         query: &str,
@@ -397,6 +400,41 @@ impl Client {
     }
 }
 
+/// Case-insensitive substring on `speaker_name`, or exact match on leftover
+/// id keys (`speaker_id`, `id`). Needle is trimmed. Used for client-side
+/// `--speaker` filtering (no API query param exists).
+pub fn speaker_matches(value: &Value, needle: &str) -> bool {
+    let needle = needle.trim();
+    if needle.is_empty() {
+        return false;
+    }
+
+    if let Some(name) = value.get("speaker_name") {
+        let name = json_as_str(name);
+        if !name.is_empty() && name.to_lowercase().contains(&needle.to_lowercase()) {
+            return true;
+        }
+    }
+
+    for key in ["speaker_id", "id"] {
+        if let Some(id) = value.get(key) {
+            if json_as_str(id) == needle {
+                return true;
+            }
+        }
+    }
+
+    false
+}
+
+fn json_as_str(value: &Value) -> String {
+    match value {
+        Value::String(s) => s.clone(),
+        Value::Null => String::new(),
+        other => other.to_string(),
+    }
+}
+
 fn xml_tag<'a>(xml: &'a str, tag: &str) -> Option<&'a str> {
     let start = xml.find(&format!("<{tag}>"))? + tag.len() + 2;
     let end = xml[start..].find(&format!("</{tag}>"))? + start;
@@ -405,7 +443,8 @@ fn xml_tag<'a>(xml: &'a str, tag: &str) -> Option<&'a str> {
 
 #[cfg(test)]
 mod tests {
-    use super::xml_tag;
+    use super::{speaker_matches, xml_tag};
+    use serde_json::json;
 
     #[test]
     fn xml_tag_extracts_s3_fields() {
@@ -413,5 +452,33 @@ mod tests {
         assert_eq!(xml_tag(xml, "Bucket"), Some("speech-upload-prod"));
         assert_eq!(xml_tag(xml, "Key"), Some("k/v.wav"));
         assert_eq!(xml_tag(xml, "ETag"), None);
+    }
+
+    #[test]
+    fn speaker_matches_name_substring_case_insensitive() {
+        let speaker = json!({"id": 1, "speaker_name": "Alice Example"});
+        assert!(speaker_matches(&speaker, "alice"));
+        assert!(speaker_matches(&speaker, "Alice"));
+        assert!(speaker_matches(&speaker, "EXAMPLE"));
+        assert!(speaker_matches(&speaker, "  ali  "));
+        assert!(!speaker_matches(&speaker, "Bob"));
+    }
+
+    #[test]
+    fn speaker_matches_id_exact_stringified() {
+        let by_id = json!({"id": 99, "speaker_name": "Alice"});
+        assert!(speaker_matches(&by_id, "99"));
+        assert!(!speaker_matches(&by_id, "9"));
+
+        let by_speaker_id = json!({"speaker_id": "42", "speaker_name": "Bob"});
+        assert!(speaker_matches(&by_speaker_id, "42"));
+        assert!(!speaker_matches(&by_speaker_id, "4"));
+    }
+
+    #[test]
+    fn speaker_matches_empty_needle_is_false() {
+        let speaker = json!({"id": 1, "speaker_name": "Alice"});
+        assert!(!speaker_matches(&speaker, ""));
+        assert!(!speaker_matches(&speaker, "   "));
     }
 }
