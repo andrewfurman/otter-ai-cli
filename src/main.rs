@@ -260,3 +260,44 @@ fn main() {
         },
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn list_and_search_accept_speaker_flag() {
+        let list = Cli::try_parse_from(["otter", "speeches", "list", "--speaker", "Alice"])
+            .expect("list --speaker should parse");
+        match list.command {
+            Command::Speeches(SpeechesCommand::List { speaker, .. }) => {
+                assert_eq!(speaker.as_deref(), Some("Alice"));
+            }
+            _ => panic!("expected speeches list"),
+        }
+
+        let search = Cli::try_parse_from([
+            "otter",
+            "speeches",
+            "search",
+            "hello",
+            "otid123",
+            "--speaker",
+            "42",
+        ])
+        .expect("search --speaker should parse");
+        match search.command {
+            Command::Speeches(SpeechesCommand::Search {
+                speaker,
+                query,
+                speech_id,
+                ..
+            }) => {
+                assert_eq!(query, "hello");
+                assert_eq!(speech_id, "otid123");
+                assert_eq!(speaker.as_deref(), Some("42"));
+            }
+            _ => panic!("expected speeches search"),
+        }
+    }
+}
