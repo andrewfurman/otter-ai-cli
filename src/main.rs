@@ -66,6 +66,9 @@ enum SpeechesCommand {
         /// Only show speeches from the last N days
         #[arg(short, long)]
         days: Option<i64>,
+        /// Filter by speaker name (case-insensitive substring) or speaker id
+        #[arg(long)]
+        speaker: Option<String>,
         /// Output as JSON
         #[arg(long)]
         json: bool,
@@ -84,6 +87,9 @@ enum SpeechesCommand {
         /// Max results (default: 500)
         #[arg(short = 'n', long, default_value_t = 500)]
         size: u32,
+        /// Filter by speaker name (case-insensitive substring) or speaker id
+        #[arg(long)]
+        speaker: Option<String>,
         /// Output as JSON
         #[arg(long)]
         json: bool,
@@ -201,15 +207,17 @@ fn main() {
                 page_size,
                 source,
                 days,
+                speaker,
                 json,
-            } => speeches::list(folder, page_size, source, days, json),
+            } => speeches::list(folder, page_size, source, days, speaker, json),
             SpeechesCommand::Get { speech_id, json } => speeches::get(speech_id, json),
             SpeechesCommand::Search {
                 query,
                 speech_id,
                 size,
+                speaker,
                 json,
-            } => speeches::search(query, speech_id, size, json),
+            } => speeches::search(query, speech_id, size, speaker, json),
             SpeechesCommand::Rename { speech_id, title } => speeches::rename(speech_id, title),
             SpeechesCommand::Download {
                 speech_id,
