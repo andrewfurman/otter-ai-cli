@@ -73,18 +73,18 @@ enum Command {
 
 #[derive(Subcommand)]
 enum SpeechesCommand {
-    /// List all speeches
+    /// List one page of speeches; date/speaker filters apply to that page
     List {
         /// Folder ID or name (default: 0 = all)
         #[arg(short, long, default_value = "0")]
         folder: String,
-        /// Number of results (default: 45)
+        /// Max conversations to fetch before filtering (the server may cap this)
         #[arg(short = 'n', long, default_value_t = 45)]
         page_size: u32,
         /// Source filter (default: owned)
         #[arg(short, long, default_value = "owned", value_parser = ["owned", "shared", "all"])]
         source: String,
-        /// Only show speeches from the last N days
+        /// Only show speeches from the last N days within the fetched page
         #[arg(short, long)]
         days: Option<i64>,
         /// Filter by speaker name (case-insensitive substring) or speaker id
@@ -123,8 +123,8 @@ enum SpeechesCommand {
         /// Format(s): txt, pdf, mp3, docx, srt (comma-separated, default: txt)
         #[arg(short, long, default_value = "txt")]
         format: String,
-        /// Output filename (optional)
-        #[arg(short, long)]
+        /// Exact output path; default: OTID.<format>, or OTID.zip for multiple formats
+        #[arg(short, long, value_parser = clap::builder::NonEmptyStringValueParser::new())]
         output: Option<String>,
     },
     /// Upload an audio file for transcription
@@ -148,7 +148,7 @@ enum SpeechesCommand {
         /// Destination folder ID or name
         #[arg(short, long)]
         folder: String,
-        /// Create the folder if it doesn't exist (when using folder name)
+        /// Create a folder only after a successful lookup confirms the name is missing
         #[arg(long)]
         create: bool,
     },

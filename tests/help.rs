@@ -66,6 +66,27 @@ fn nested_tag_help_explains_batching_and_all_scope() {
 }
 
 #[test]
+fn listing_move_and_export_help_describe_their_limits() {
+    let list = help(&["speeches", "list", "--help"]);
+    assert!(list.contains("one page"));
+    assert!(list.contains("before filtering"));
+    let download = help(&["speeches", "download", "--help"]);
+    assert!(download.contains("Exact output path"));
+    assert!(download.contains("OTID.zip"));
+    let move_help = help(&["speeches", "move", "--help"]);
+    assert!(move_help.contains("successful lookup"));
+
+    let output = Command::new(env!("CARGO_BIN_EXE_otter"))
+        .args(["speeches", "download", "fixture", "--output", ""])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(2));
+    assert!(!String::from_utf8(output.stderr)
+        .unwrap()
+        .contains("Login failed"));
+}
+
+#[test]
 fn conflicting_tag_flags_fail_before_authentication() {
     let output = Command::new(env!("CARGO_BIN_EXE_otter"))
         .args(["speakers", "tag", "otid", "42", "--all", "-t", "uuid"])
