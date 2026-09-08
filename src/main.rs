@@ -1,4 +1,5 @@
 mod auth;
+mod batch_rename;
 mod folders;
 mod groups;
 mod pagination;
@@ -12,6 +13,7 @@ const RATE_LIMIT_HELP: &str = "Rate limits (observed, not an official quota):
   Separate authenticated commands each log in again. Bursts can receive HTTP 429
   from /login before the requested operation runs. Batch selected speaker tags
   with repeated -t UUID flags or -t UUID1,UUID2; batch folder moves with multiple IDs.
+  Use speeches rename-batch for title plans. Listing --days/--all pages share a login.
   On 429, stop and honor Retry-After / retry_after. If no delay is supplied, wait
   60-90 seconds, then retry slowly. Longer pauses may be needed; avoid parallel
   retry loops. A tag batch stops on its first error and reports saved/unattempted IDs.
@@ -124,6 +126,20 @@ enum SpeechesCommand {
     },
     /// Rename a speech (set new title)
     Rename { speech_id: String, title: String },
+    /// Rename recordings from a JSON plan in one authenticated session
+    #[command(
+        after_help = "Plan: an array of {otid, old_title, new_title}; old_title is a string or null.\nUse --dry-run to validate and preview offline. Apply checks the current title, skips already-correct titles, and verifies each save. The first error stops the batch and reports saved, unchanged, failed, and unattempted OTIDs. Reload an unconfirmed write before retrying. See README for a complete example."
+    )]
+    RenameBatch {
+        /// JSON plan file
+        file: std::path::PathBuf,
+        /// Validate and preview without logging in or changing recordings
+        #[arg(long)]
+        dry_run: bool,
+        /// Output the preview or completion report as JSON (progress goes to stderr)
+        #[arg(long)]
+        json: bool,
+    },
     /// Download a speech in specified format(s)
     Download {
         speech_id: String,
@@ -282,6 +298,11 @@ fn main() {
                 json,
             } => speeches::search(query, speech_id, size, speaker, json),
             SpeechesCommand::Rename { speech_id, title } => speeches::rename(speech_id, title),
+            SpeechesCommand::RenameBatch {
+                file,
+                dry_run,
+                json,
+            } => batch_rename::run(file, dry_run, json),
             SpeechesCommand::Download {
                 speech_id,
                 format,
