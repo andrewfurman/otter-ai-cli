@@ -40,7 +40,7 @@ Use this only with an Otter account you are allowed to access, and follow [Otter
 | `otter login` | Authenticate and save credentials; prompts if username/password are omitted |
 | `otter logout` | Clear saved credentials |
 | `otter user` | Show the current account |
-| `otter speeches list` | Fetch one page of conversations; filter by folder, source, days, or speaker |
+| `otter speeches list` | List conversations; `--days N` fetches its date window and `--all` fetches all pages |
 | `otter speeches get OTID` | Fetch a conversation and its transcript segments |
 | `otter speeches search QUERY OTID` | Search a transcript, optionally filtering by speaker |
 | `otter speeches rename OTID TITLE` | Change a conversation title |
@@ -61,7 +61,16 @@ Use this only with an Otter account you are allowed to access, and follow [Otter
 
 Run any command with `--help` for all its flags. Help does not authenticate or contact Otter. The top-level help inventory is generated from the command definitions so new commands appear automatically.
 
-`speeches list` fetches one page (up to `--page-size`, default 45) and then applies date and speaker filters. If Otter reports more results or omits its completeness flag, the CLI prints a notice to stderr, including how many conversations were fetched. No matches in that page does not establish that no matching conversation exists. Increasing `--page-size` requests a larger window, subject to the server's cap. JSON stdout remains parseable and retains Otter's `end_of_list` field when supplied; automatic pagination is not implemented.
+`speeches list` defaults to one page (`--page-size 45`) with an incompleteness notice when more results may exist. `--days N` automatically follows pages until its creation-time window is covered; `--all` fetches the full archive, or the complete date window when combined with `--days`. Folder and source filters stay on every request; speaker filtering happens after collection. No matches on the default single page does not establish that no matching conversation exists.
+
+Pagination reuses one login, follows Otter's `last_load_ts` cursor with `modified_after=1`, and removes overlapping results by OTID, keeping the first observed copy. Requests of 100 per page worked in the September 2026 archive review; much larger requests timed out. `--page-size` is a per-request size, subject to Otter's behavior, not a total result limit. `--days` retains the existing `created_at` semantics (creation/upload time, which can differ from recording time).
+
+JSON includes `pagination.complete`, `scope`, `created_after`, `pages_fetched`, `unique_fetched`, `stop_reason`, `error`, and `retry_after_seconds`. Completeness refers to the requested archive/date window before speaker filtering. Otter's last-page `end_of_list` is retained, so it can be false when the requested date window is complete. Pagination stops without retries on API/transport failures, malformed pages, missing/non-advancing cursors, or `--max-pages` (default 1000). These failures retain collected results, mark completion false, and exit nonzero. Date-window coverage relies on the observed cursor being the next historical page's creation-time upper bound; this is an unofficial API, not a transactional snapshot.
+
+```bash
+otter speeches list --days 14 --page-size 100 --json
+otter speeches list --all --page-size 100 --speaker "Alice" --json
+```
 
 `speeches move --create` creates a folder only when a successful folder lookup confirms that its name is missing. A failed lookup stops the command before any folder creation or moves, including permission, rate-limit, network, and malformed-response errors. Creation must return a valid folder ID before the move proceeds.
 

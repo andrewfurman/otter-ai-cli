@@ -68,7 +68,9 @@ fn nested_tag_help_explains_batching_and_all_scope() {
 #[test]
 fn listing_move_and_export_help_describe_their_limits() {
     let list = help(&["speeches", "list", "--help"]);
-    assert!(list.contains("one page"));
+    assert!(list.contains("--all"));
+    assert!(list.contains("--max-pages"));
+    assert!(list.contains("complete last N days"));
     assert!(list.contains("before filtering"));
     let download = help(&["speeches", "download", "--help"]);
     assert!(download.contains("Exact output path"));
@@ -96,4 +98,18 @@ fn conflicting_tag_flags_fail_before_authentication() {
     let error = String::from_utf8(output.stderr).unwrap();
     assert!(error.contains("cannot be used with"));
     assert!(!error.contains("Login failed"));
+}
+
+#[test]
+fn invalid_listing_bounds_fail_before_authentication() {
+    for (flag, value) in [("--days", "0"), ("--page-size", "0"), ("--max-pages", "0")] {
+        let output = Command::new(env!("CARGO_BIN_EXE_otter"))
+            .args(["speeches", "list", flag, value])
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(2));
+        assert!(!String::from_utf8(output.stderr)
+            .unwrap()
+            .contains("Login failed"));
+    }
 }
