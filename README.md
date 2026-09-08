@@ -83,6 +83,8 @@ Both forms reuse one login, one speaker lookup, one transcript fetch, and one HT
 
 The batch stops on the first API or transport error and exits nonzero. Successful tags remain saved. JSON output reports `tagged_uuids`, `failed_uuid`, `unattempted_uuids`, `error`, and `retry_after_seconds`, along with the conversation and speaker IDs. A failed or interrupted network request may already have saved its change: reload the conversation before retrying that segment, then resume only the necessary IDs. The CLI does not automatically replay mutations.
 
+Commands check Otter's JSON status as well as the HTTP status. An explicit non-`OK` API status fails even with HTTP 200, and malformed JSON success responses fail instead of becoming empty results. JSON export errors are reported before writing an output file. For JSON API endpoints, HTTP errors still retain their status and retry guidance when the server sends a non-JSON error page.
+
 ## Rate limits: findings and operating guidance
 
 The CLI currently authenticates once per command invocation. Separate commands still log in separately; there is no session cache shared between processes. Repeated single-segment tagging therefore sends repeated `/login` requests, even though all tags could use one session. HTTP 429 can occur during login **before the requested operation runs**. Batching selected tags fixes this workflow without adding persistent session-cookie storage.

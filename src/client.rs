@@ -12,6 +12,14 @@ const S3_UPLOAD_URL: &str = "https://s3.us-west-2.amazonaws.com/speech-upload-pr
 pub enum Error {
     #[error("http error: {0}")]
     Http(#[from] reqwest::Error),
+    #[error("invalid JSON response (HTTP {status}): {source}")]
+    InvalidJson {
+        status: u16,
+        #[source]
+        source: reqwest::Error,
+    },
+    #[error("unexpected response (HTTP {status}): expected {expected}")]
+    UnexpectedResponse { status: u16, expected: &'static str },
     #[error("{0}")]
     Io(#[from] std::io::Error),
     #[error("userid is invalid")]
@@ -32,8 +40,15 @@ pub struct ApiResponse {
 }
 
 impl ApiResponse {
+    /// Some endpoints return bare objects/arrays. When an API status is present,
+    /// only OK acknowledges success, regardless of the HTTP status code.
     pub fn ok(&self) -> bool {
         self.status == 200
+            && self.data.get("status").is_none_or(|status| {
+                status
+                    .as_str()
+                    .is_some_and(|status| status.eq_ignore_ascii_case("OK"))
+            })
     }
 }
 
@@ -44,8 +59,18 @@ fn handle_response(response: reqwest::blocking::Response) -> Result<ApiResponse,
         .get(reqwest::header::RETRY_AFTER)
         .and_then(|value| value.to_str().ok())
         .map(str::to_owned);
-    // Like the Python client: a non-JSON body becomes an empty data dict.
-    let data = response.json().unwrap_or_else(|_| json!({}));
+    let data = match response.json::<Value>() {
+        Ok(data) => data,
+        // Keep the HTTP failure and Retry-After even if an error page is HTML.
+        Err(_) if status != 200 => json!({}),
+        Err(source) => return Err(Error::InvalidJson { status, source }),
+    };
+    if status == 200 && !data.is_object() && !data.is_array() {
+        return Err(Error::UnexpectedResponse {
+            status,
+            expected: "a JSON object or array",
+        });
+    }
     let retry_after_seconds = if status == 429 {
         retry_delay(retry_after.as_deref(), &data, std::time::SystemTime::now())
     } else {
@@ -211,11 +236,11 @@ impl Client {
             .get(format!("{API_BASE_URL}speech_upload_params"))
             .query(&[("userid", self.userid()?)])
             .send()?;
-        if response.status().as_u16() != 200 {
-            return handle_response(response);
+        let params = handle_response(response)?;
+        if !params.ok() {
+            return Ok(params);
         }
-        let params: Value = response.json()?;
-        let Some(fields) = params["data"].as_object() else {
+        let Some(fields) = params.data["data"].as_object() else {
             return Err(Error::Upload(
                 "speech_upload_params returned no data".into(),
             ));
@@ -255,7 +280,13 @@ impl Client {
 
         let response = self.http.post(S3_UPLOAD_URL).multipart(form).send()?;
         if response.status().as_u16() != 201 {
-            return handle_response(response);
+            let result = handle_response(response)?;
+            if result.ok() {
+                return Err(Error::Upload(
+                    "S3 did not acknowledge the upload with HTTP 201".into(),
+                ));
+            }
+            return Ok(result);
         }
         let xml = response.text()?;
         let bucket = xml_tag(&xml, "Bucket")
@@ -301,21 +332,7 @@ impl Client {
             fileformat
         };
         let filename = format!("{}.{extension}", name.unwrap_or(speech_id));
-        let status = response.status().as_u16();
-        if !response.status().is_success() {
-            return Err(Error::Download {
-                status,
-                speech_id: speech_id.to_string(),
-            });
-        }
-        std::fs::write(&filename, response.bytes()?)?;
-        let mut data = Map::new();
-        data.insert("filename".into(), Value::String(filename));
-        Ok(ApiResponse {
-            status,
-            data: Value::Object(data),
-            retry_after_seconds: None,
-        })
+        save_export(response, &filename, speech_id)
     }
 
     pub fn move_to_trash_bin(&self, speech_id: &str) -> Result<ApiResponse, Error> {
@@ -433,6 +450,56 @@ impl Client {
     }
 }
 
+fn save_export(
+    response: reqwest::blocking::Response,
+    filename: &str,
+    speech_id: &str,
+) -> Result<ApiResponse, Error> {
+    // Export formats are files, but Otter may instead send a JSON rejection
+    // with HTTP 200. Never save that error as the requested output file.
+    if response
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(is_json_content_type)
+    {
+        let result = handle_response(response)?;
+        if !result.ok() {
+            return Ok(result);
+        }
+        return Err(Error::UnexpectedResponse {
+            status: result.status,
+            expected: "an export file, not JSON",
+        });
+    }
+
+    let status = response.status().as_u16();
+    if !response.status().is_success() {
+        return Err(Error::Download {
+            status,
+            speech_id: speech_id.to_string(),
+        });
+    }
+    std::fs::write(filename, response.bytes()?)?;
+    let mut data = Map::new();
+    data.insert("filename".into(), Value::String(filename.to_string()));
+    Ok(ApiResponse {
+        status,
+        data: Value::Object(data),
+        retry_after_seconds: None,
+    })
+}
+
+fn is_json_content_type(value: &str) -> bool {
+    let media_type = value
+        .split(';')
+        .next()
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_lowercase();
+    media_type == "application/json" || media_type.ends_with("+json")
+}
+
 /// Case-insensitive substring on `speaker_name`, or exact match on leftover
 /// id keys (`speaker_id`, `id`). Needle is trimmed. Used for client-side
 /// `--speaker` filtering (no API query param exists).
@@ -476,7 +543,7 @@ fn xml_tag<'a>(xml: &'a str, tag: &str) -> Option<&'a str> {
 
 #[cfg(test)]
 mod tests {
-    use super::{handle_response, retry_delay, speaker_matches, xml_tag};
+    use super::{handle_response, retry_delay, save_export, speaker_matches, xml_tag, Error};
     use serde_json::json;
 
     #[test]
@@ -509,11 +576,11 @@ mod tests {
         assert_eq!(retry_delay(None, &json!({}), now), None);
     }
 
-    #[test]
-    fn http_response_preserves_rate_limit_header_and_body() {
+    fn mock_response(status: u16, headers: &str, body: &str) -> reqwest::blocking::Response {
         use std::io::{Read, Write};
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();
+        let reply = format!("HTTP/1.1 {status} Fixture\r\n{headers}Content-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
         let server = std::thread::spawn(move || {
             let (mut socket, _) = listener.accept().unwrap();
             socket
@@ -526,20 +593,133 @@ mod tests {
                 assert!(count > 0, "request ended before its headers");
                 request.extend_from_slice(&buffer[..count]);
             }
-            let body = r#"{"status":"failed","retry_after":16}"#;
-            write!(socket, "HTTP/1.1 429 Too Many Requests\r\nRetry-After: 30\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", body.len(), body).unwrap();
+            socket.write_all(reply.as_bytes()).unwrap();
         });
         let client = reqwest::blocking::Client::builder()
             .no_proxy()
             .timeout(std::time::Duration::from_secs(5))
             .build()
             .unwrap();
-        let result =
-            handle_response(client.get(format!("http://{address}/")).send().unwrap()).unwrap();
+        let response = client.get(format!("http://{address}/")).send().unwrap();
         server.join().unwrap();
+        response
+    }
+
+    #[test]
+    fn http_response_preserves_rate_limit_header_and_body() {
+        let response = mock_response(
+            429,
+            "Retry-After: 30\r\n",
+            r#"{"status":"failed","retry_after":16}"#,
+        );
+        let result = handle_response(response).unwrap();
         assert_eq!(result.status, 429);
         assert_eq!(result.retry_after_seconds, Some(30));
         assert_eq!(result.data["retry_after"], 16);
+    }
+
+    #[test]
+    fn api_status_and_legacy_payloads_are_classified_consistently() {
+        for (status, data, expected) in [
+            (200, json!({"status": "OK"}), true),
+            (200, json!({"status": "ok"}), true),
+            (
+                200,
+                json!({"status": "failed", "message": "permission denied"}),
+                false,
+            ),
+            (200, json!({"status": "error"}), false),
+            (200, json!({"status": "pending"}), false),
+            (200, json!({"status": false}), false),
+            (200, json!({"status": null}), false),
+            (200, json!({"results": []}), true),
+            (200, json!([{"id": 7, "group_name": "Team"}]), true),
+            (403, json!({"status": "OK"}), false),
+            (500, json!({"status": "failed"}), false),
+        ] {
+            let result = handle_response(mock_response(status, "", &data.to_string())).unwrap();
+            assert_eq!(result.ok(), expected, "HTTP {status}: {data}");
+            assert_eq!(
+                result.data, data,
+                "keep server details for command error messages"
+            );
+        }
+    }
+
+    #[test]
+    fn malformed_success_responses_are_errors() {
+        for body in ["", "<html>upstream error</html>", "{"] {
+            assert!(matches!(
+                handle_response(mock_response(200, "", body)),
+                Err(Error::InvalidJson { status: 200, .. })
+            ));
+        }
+        for body in ["null", "42", "\"unexpected scalar\""] {
+            assert!(matches!(
+                handle_response(mock_response(200, "", body)),
+                Err(Error::UnexpectedResponse { status: 200, .. })
+            ));
+        }
+    }
+
+    #[test]
+    fn non_json_http_errors_preserve_status_and_retry_headers() {
+        for status in [403, 429, 500] {
+            let response = mock_response(status, "Retry-After: 30\r\n", "<html>error</html>");
+            let result = handle_response(response).unwrap();
+            assert!(!result.ok());
+            assert_eq!(result.status, status);
+            assert_eq!(
+                result.retry_after_seconds,
+                if status == 429 { Some(30) } else { None }
+            );
+        }
+    }
+
+    #[test]
+    fn json_export_errors_do_not_overwrite_files() {
+        let directory = tempfile::tempdir().unwrap();
+        let filename = directory.path().join("existing.txt");
+        std::fs::write(&filename, "keep existing content").unwrap();
+        for (content_type, body) in [
+            (
+                "application/json",
+                r#"{"status":"failed","message":"permission denied"}"#,
+            ),
+            (
+                "application/problem+json; charset=utf-8",
+                r#"{"status":"error"}"#,
+            ),
+            ("Application/JSON", "<html>invalid JSON</html>"),
+            ("application/json", r#"{"status":"OK"}"#),
+        ] {
+            let response = mock_response(200, &format!("Content-Type: {content_type}\r\n"), body);
+            let result = save_export(response, filename.to_str().unwrap(), "fixture");
+            assert!(result.is_err() || !result.unwrap().ok());
+            assert_eq!(
+                std::fs::read_to_string(&filename).unwrap(),
+                "keep existing content"
+            );
+        }
+    }
+
+    #[test]
+    fn successful_exports_still_write_file_bytes() {
+        let directory = tempfile::tempdir().unwrap();
+        let filename = directory.path().join("transcript.txt");
+        // JSON-looking text is a legitimate transcript when served as a file.
+        let response = mock_response(
+            200,
+            "Content-Type: text/plain\r\n",
+            r#"{"a transcript can contain JSON": true}"#,
+        );
+        let result = save_export(response, filename.to_str().unwrap(), "fixture").unwrap();
+        assert!(result.ok());
+        assert_eq!(result.data["filename"], filename.to_str().unwrap());
+        assert_eq!(
+            std::fs::read_to_string(filename).unwrap(),
+            r#"{"a transcript can contain JSON": true}"#
+        );
     }
 
     #[test]
