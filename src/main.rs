@@ -142,6 +142,9 @@ enum SpeechesCommand {
         yes: bool,
     },
     /// Move speech(es) to a folder
+    #[command(
+        after_help = "Pass OTIDs as separate arguments. Duplicates are removed. Success requires every OTID in Otter's acknowledgement; partial or malformed results exit nonzero and report unconfirmed completion. Reload affected recordings before retrying."
+    )]
     Move {
         #[arg(required = true)]
         speech_ids: Vec<String>,

@@ -24,6 +24,8 @@ pub enum Error {
     Io(#[from] std::io::Error),
     #[error("userid is invalid")]
     InvalidUserId,
+    #[error("invalid input: {0}")]
+    InvalidInput(String),
     #[error("Got response status {status} when attempting to download {speech_id}")]
     Download { status: u16, speech_id: String },
     #[error("upload failed: {0}")]
@@ -428,19 +430,33 @@ impl Client {
         folder_id: &str,
         speech_ids: &[String],
     ) -> Result<ApiResponse, Error> {
-        let form: Vec<(&str, &str)> = speech_ids
-            .iter()
-            .map(|id| ("speech_otid_list", id.as_str()))
-            .collect();
-        let response = self
+        let response = self.move_request(folder_id, speech_ids)?.send()?;
+        handle_response(response)
+    }
+
+    fn move_request(
+        &self,
+        folder_id: &str,
+        speech_ids: &[String],
+    ) -> Result<reqwest::blocking::RequestBuilder, Error> {
+        if speech_ids.is_empty()
+            || speech_ids
+                .iter()
+                .any(|id| id.trim().is_empty() || id.contains(','))
+        {
+            return Err(Error::InvalidInput(
+                "provide nonempty OTIDs separately, without commas".into(),
+            ));
+        }
+        // Otter reads one field, not repeated form keys (which silently move only
+        // the last recording). Keep the comma inside the form-encoded value.
+        Ok(self
             .http
             .post(format!("{API_BASE_URL}add_folder_speeches"))
             .query(&[("userid", self.userid()?), ("folder_id", folder_id)])
             .header("x-csrftoken", self.csrf_token())
             .header("referer", "https://otter.ai/")
-            .form(&form)
-            .send()?;
-        handle_response(response)
+            .form(&[("speech_otid_list", speech_ids.join(","))]))
     }
 }
 
@@ -557,6 +573,34 @@ mod tests {
         export_filename, handle_response, retry_delay, save_export, speaker_matches, xml_tag, Error,
     };
     use serde_json::json;
+
+    #[test]
+    fn bulk_move_request_sends_one_comma_separated_field() {
+        let mut client = super::Client::new().unwrap();
+        client.userid = Some("123".into());
+        let request = client
+            .move_request("456", &["first-OTID".into(), "second_OTID".into()])
+            .unwrap()
+            .build()
+            .unwrap();
+        assert_eq!(request.method(), reqwest::Method::POST);
+        assert_eq!(request.url().path(), "/forward/api/v1/add_folder_speeches");
+        assert_eq!(request.url().query(), Some("userid=123&folder_id=456"));
+        assert_eq!(
+            request.headers()["content-type"],
+            "application/x-www-form-urlencoded"
+        );
+        assert_eq!(
+            request.body().unwrap().as_bytes().unwrap(),
+            b"speech_otid_list=first-OTID%2Csecond_OTID"
+        );
+        for ids in [vec![], vec!["".into()], vec!["first,second".into()]] {
+            assert!(matches!(
+                client.move_request("456", &ids),
+                Err(Error::InvalidInput(_))
+            ));
+        }
+    }
 
     #[test]
     fn retry_delays_accept_headers_json_and_http_dates() {
