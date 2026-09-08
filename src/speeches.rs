@@ -5,8 +5,8 @@ use serde_json::{json, Value};
 
 use crate::auth::{authenticated_client, prompt};
 use crate::util::{
-    api, die, fail, format_duration, format_timestamp, print_json, resolve_folder_id, result_repr,
-    transcript_segments, truthy, value_str,
+    api, die, fail, folder_id_of, format_duration, format_timestamp, print_json, resolve_folder_id,
+    result_repr, transcript_segments, truthy, value_str, FolderLookupError,
 };
 
 #[allow(clippy::too_many_arguments)]
@@ -25,7 +25,7 @@ pub fn list(
     } else {
         match resolve_folder_id(&client, &folder) {
             Ok(id) => id,
-            Err(message) => die(message),
+            Err(error) => die(error.to_string()),
         }
     };
 
@@ -35,6 +35,10 @@ pub fn list(
     }
 
     let mut data = result.data;
+    let incomplete = data["end_of_list"].as_bool() != Some(true);
+    if let Some(warning) = listing_warning(&data, page_size) {
+        eprintln!("{warning}");
+    }
     if let Some(days) = days {
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -64,7 +68,14 @@ pub fn list(
 
     let speeches = data["speeches"].as_array().cloned().unwrap_or_default();
     if speeches.is_empty() {
-        println!("No speeches found.");
+        println!(
+            "{}",
+            if incomplete {
+                "No speeches found in the fetched page."
+            } else {
+                "No speeches found."
+            }
+        );
         return;
     }
 
@@ -296,18 +307,18 @@ pub fn move_to_folder(speech_ids: Vec<String>, folder: String, create: bool) {
     } else {
         match resolve_folder_id(&client, &folder) {
             Ok(id) => id,
-            Err(message) if create => {
-                let _ = message;
+            Err(FolderLookupError::NotFound(_)) if create => {
                 let result = api(client.create_folder(&folder));
                 if !result.ok() {
                     fail(format!("Failed to create folder: {}", result_repr(&result)));
                 }
-                let id = value_str(&result.data["folder"]["id"]);
-                let id = if id.is_empty() { "unknown".into() } else { id };
+                let id = folder_id_of(&result.data["folder"]).unwrap_or_else(|| {
+                    fail("Folder creation returned no valid folder ID; no speeches were moved.")
+                });
                 println!("Created folder '{folder}' (ID: {id})");
                 id
             }
-            Err(message) => die(message),
+            Err(error) => die(error.to_string()),
         }
     };
 
@@ -333,6 +344,16 @@ fn speaker_names(speakers: &Value) -> Vec<String> {
                 .collect()
         })
         .unwrap_or_default()
+}
+
+fn listing_warning(data: &Value, page_size: u32) -> Option<String> {
+    let completeness = match data["end_of_list"].as_bool() {
+        Some(true) => return None,
+        Some(false) => "Otter reports more conversations remain.",
+        None => "Otter did not report whether more conversations remain.",
+    };
+    let fetched = data["speeches"].as_array().map_or(0, Vec::len);
+    Some(format!("Fetched {fetched} conversations (requested up to {page_size}). {completeness} Date and speaker filters apply only to this page. Increase --page-size to request a larger window; the server may cap it."))
 }
 
 fn first_truthy(item: &Value, keys: &[&str]) -> String {
@@ -391,6 +412,21 @@ fn filter_segments_by_speaker_and_query(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn listing_warning_reports_incomplete_and_unknown_windows() {
+        let mut data = json!({"speeches": [{"otid": "a"}], "end_of_list": false});
+        let warning = listing_warning(&data, 45).unwrap();
+        assert!(warning.contains("Fetched 1 conversations (requested up to 45)"));
+        assert!(warning.contains("more conversations remain"));
+        assert!(warning.contains("filters apply only to this page"));
+        data["end_of_list"] = json!(true);
+        assert!(listing_warning(&data, 45).is_none());
+        data["end_of_list"] = Value::Null;
+        assert!(listing_warning(&data, 45)
+            .unwrap()
+            .contains("did not report whether"));
+    }
 
     #[test]
     fn normalize_speaker_trims_and_drops_empty() {

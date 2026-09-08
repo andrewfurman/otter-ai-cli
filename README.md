@@ -40,7 +40,7 @@ Use this only with an Otter account you are allowed to access, and follow [Otter
 | `otter login` | Authenticate and save credentials; prompts if username/password are omitted |
 | `otter logout` | Clear saved credentials |
 | `otter user` | Show the current account |
-| `otter speeches list` | List conversations; filter by folder, source, days, or speaker |
+| `otter speeches list` | Fetch one page of conversations; filter by folder, source, days, or speaker |
 | `otter speeches get OTID` | Fetch a conversation and its transcript segments |
 | `otter speeches search QUERY OTID` | Search a transcript, optionally filtering by speaker |
 | `otter speeches rename OTID TITLE` | Change a conversation title |
@@ -60,6 +60,14 @@ Use this only with an Otter account you are allowed to access, and follow [Otter
 | `otter help [COMMAND]` | Show help, including nested commands such as `help speakers tag` |
 
 Run any command with `--help` for all its flags. Help does not authenticate or contact Otter. The top-level help inventory is generated from the command definitions so new commands appear automatically.
+
+`speeches list` fetches one page (up to `--page-size`, default 45) and then applies date and speaker filters. If Otter reports more results or omits its completeness flag, the CLI prints a notice to stderr, including how many conversations were fetched. No matches in that page does not establish that no matching conversation exists. Increasing `--page-size` requests a larger window, subject to the server's cap. JSON stdout remains parseable and retains Otter's `end_of_list` field when supplied; automatic pagination is not implemented.
+
+`speeches move --create` creates a folder only when a successful folder lookup confirms that its name is missing. A failed lookup stops the command before any folder creation or moves, including permission, rate-limit, network, and malformed-response errors. Creation must return a valid folder ID before the move proceeds.
+
+`speeches download --output PATH` writes to that **exact path**, including when it has no extension. For example, `--format mp3 --output interview.mp3` produces `interview.mp3`. Without `--output`, the filename is `OTID.<format>`, or `OTID.zip` for multiple comma-separated formats. Older versions treated `--output` as a stem and appended an extension; include the extension yourself when upgrading scripts that relied on that behavior.
+
+Uploads stream the audio file, and downloads stream into a temporary file beside the destination. A download replaces the destination only after the complete HTTP 200 export arrives. HTTP errors, partial responses, and interrupted transfers leave an existing destination unchanged. Temporary files are removed on handled failures. Export errors preserve server retry guidance, including non-JSON rate-limit responses.
 
 ## Tag selected speakers in one session
 
@@ -85,7 +93,7 @@ Both forms reuse one login, one speaker lookup, one transcript fetch, and one HT
 
 The batch stops on the first API or transport error and exits nonzero. Successful tags remain saved. JSON output reports `tagged_uuids`, `failed_uuid`, `unattempted_uuids`, `error`, and `retry_after_seconds`, along with the conversation and speaker IDs. A failed or interrupted network request may already have saved its change: reload the conversation before retrying that segment, then resume only the necessary IDs. The CLI does not automatically replay mutations.
 
-Commands check Otter's JSON status as well as the HTTP status. An explicit non-`OK` API status fails even with HTTP 200, and malformed JSON success responses fail instead of becoming empty results. JSON export errors are reported before writing an output file. For JSON API endpoints, HTTP errors still retain their status and retry guidance when the server sends a non-JSON error page.
+Commands check Otter's JSON status as well as the HTTP status. An explicit non-`OK` API status fails even with HTTP 200, and malformed JSON success responses fail instead of becoming empty results. JSON export errors are reported before writing an output file. API and export HTTP errors retain their status and retry guidance when the server sends a non-JSON error page.
 
 ## Rate limits: findings and operating guidance
 
@@ -99,7 +107,7 @@ These are observations from actual cleanup runs, **not an official quota or a gu
 When automating:
 
 1. Batch selected speaker tags with repeated `-t` flags or comma-separated UUIDs. Batch folder moves by passing multiple OTIDs.
-2. On HTTP 429, stop. Honor the server's `Retry-After` header or JSON `retry_after` delay. JSON API error messages surface the delay, and tag batch results include it as `retry_after_seconds`; if both are present, the longer delay is used.
+2. On HTTP 429, stop. Honor the server's `Retry-After` header or JSON `retry_after` delay. API and export error messages surface the delay, and tag batch results include it as `retry_after_seconds`; if both are present, the longer delay is used.
 3. If the server provides no delay, start with a 60–90 second pause, then retry slowly. A longer pause may be necessary. Do not run parallel retry loops or repeatedly log in to check whether the limit has cleared.
 4. Preserve the batch result and reload affected segments before resuming after an error. Some tags may already be saved.
 

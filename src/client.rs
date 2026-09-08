@@ -272,8 +272,7 @@ impl Client {
             };
             form = form.text(key.clone(), text);
         }
-        let bytes = std::fs::read(file_name)?;
-        let part = multipart::Part::bytes(bytes)
+        let part = multipart::Part::file(file_name)?
             .file_name(file_name.to_string())
             .mime_str(content_type)?;
         form = form.part("file", part);
@@ -310,11 +309,11 @@ impl Client {
         handle_response(response)
     }
 
-    /// Downloads to `<name or speech_id>.<ext>` and returns `{"filename": ...}` as data.
+    /// Downloads to the exact output path, defaulting to `<speech_id>.<ext>`.
     pub fn download_speech(
         &self,
         speech_id: &str,
-        name: Option<&str>,
+        output: Option<&str>,
         fileformat: &str,
     ) -> Result<ApiResponse, Error> {
         let response = self
@@ -326,13 +325,8 @@ impl Client {
             .form(&[("formats", fileformat), ("speech_otid_list", speech_id)])
             .send()?;
 
-        let extension = if fileformat.contains(',') {
-            "zip"
-        } else {
-            fileformat
-        };
-        let filename = format!("{}.{extension}", name.unwrap_or(speech_id));
-        save_export(response, &filename, speech_id)
+        let filename = export_filename(speech_id, output, fileformat);
+        save_export(response, &filename)
     }
 
     pub fn move_to_trash_bin(&self, speech_id: &str) -> Result<ApiResponse, Error> {
@@ -450,11 +444,22 @@ impl Client {
     }
 }
 
+fn export_filename(speech_id: &str, output: Option<&str>, format: &str) -> String {
+    output.map(str::to_owned).unwrap_or_else(|| {
+        let extension = if format.contains(',') { "zip" } else { format };
+        format!("{speech_id}.{extension}")
+    })
+}
+
 fn save_export(
-    response: reqwest::blocking::Response,
+    mut response: reqwest::blocking::Response,
     filename: &str,
-    speech_id: &str,
 ) -> Result<ApiResponse, Error> {
+    // Preserve status and retry guidance regardless of an error's Content-Type.
+    // A partial (206) response must not replace the requested complete export.
+    if response.status().as_u16() != 200 {
+        return handle_response(response);
+    }
     // Export formats are files, but Otter may instead send a JSON rejection
     // with HTTP 200. Never save that error as the requested output file.
     if response
@@ -474,13 +479,18 @@ fn save_export(
     }
 
     let status = response.status().as_u16();
-    if !response.status().is_success() {
-        return Err(Error::Download {
-            status,
-            speech_id: speech_id.to_string(),
-        });
-    }
-    std::fs::write(filename, response.bytes()?)?;
+    let destination = std::path::Path::new(filename);
+    let directory = destination
+        .parent()
+        .filter(|path| !path.as_os_str().is_empty())
+        .unwrap_or_else(|| std::path::Path::new("."));
+    // The temporary file is on the destination filesystem, so a completed
+    // transfer can replace it atomically. Errors drop the temporary file.
+    let mut temporary = tempfile::NamedTempFile::new_in(directory)?;
+    response.copy_to(temporary.as_file_mut())?;
+    temporary
+        .persist(destination)
+        .map_err(|error| error.error)?;
     let mut data = Map::new();
     data.insert("filename".into(), Value::String(filename.to_string()));
     Ok(ApiResponse {
@@ -543,7 +553,9 @@ fn xml_tag<'a>(xml: &'a str, tag: &str) -> Option<&'a str> {
 
 #[cfg(test)]
 mod tests {
-    use super::{handle_response, retry_delay, save_export, speaker_matches, xml_tag, Error};
+    use super::{
+        export_filename, handle_response, retry_delay, save_export, speaker_matches, xml_tag, Error,
+    };
     use serde_json::json;
 
     #[test]
@@ -577,10 +589,19 @@ mod tests {
     }
 
     fn mock_response(status: u16, headers: &str, body: &str) -> reqwest::blocking::Response {
+        mock_response_with_length(status, headers, body, body.len())
+    }
+
+    fn mock_response_with_length(
+        status: u16,
+        headers: &str,
+        body: &str,
+        length: usize,
+    ) -> reqwest::blocking::Response {
         use std::io::{Read, Write};
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();
-        let reply = format!("HTTP/1.1 {status} Fixture\r\n{headers}Content-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+        let reply = format!("HTTP/1.1 {status} Fixture\r\n{headers}Content-Length: {length}\r\nConnection: close\r\n\r\n{body}");
         let server = std::thread::spawn(move || {
             let (mut socket, _) = listener.accept().unwrap();
             socket
@@ -694,7 +715,7 @@ mod tests {
             ("application/json", r#"{"status":"OK"}"#),
         ] {
             let response = mock_response(200, &format!("Content-Type: {content_type}\r\n"), body);
-            let result = save_export(response, filename.to_str().unwrap(), "fixture");
+            let result = save_export(response, filename.to_str().unwrap());
             assert!(result.is_err() || !result.unwrap().ok());
             assert_eq!(
                 std::fs::read_to_string(&filename).unwrap(),
@@ -713,13 +734,100 @@ mod tests {
             "Content-Type: text/plain\r\n",
             r#"{"a transcript can contain JSON": true}"#,
         );
-        let result = save_export(response, filename.to_str().unwrap(), "fixture").unwrap();
+        let result = save_export(response, filename.to_str().unwrap()).unwrap();
         assert!(result.ok());
         assert_eq!(result.data["filename"], filename.to_str().unwrap());
         assert_eq!(
             std::fs::read_to_string(filename).unwrap(),
             r#"{"a transcript can contain JSON": true}"#
         );
+    }
+
+    #[test]
+    fn export_paths_are_exact_when_provided_and_default_to_the_format() {
+        for (output, format, expected) in [
+            (Some("recording.mp3"), "mp3", "recording.mp3"),
+            (Some("folder/transcript"), "txt", "folder/transcript"),
+            (Some("folder/export.zip"), "txt,pdf", "folder/export.zip"),
+            (Some("custom.bin"), "txt,pdf", "custom.bin"),
+            (None, "mp3", "fixture.mp3"),
+            (None, "txt,pdf", "fixture.zip"),
+        ] {
+            assert_eq!(export_filename("fixture", output, format), expected);
+        }
+    }
+
+    #[test]
+    fn export_http_errors_keep_retry_guidance_without_writing_files() {
+        let directory = tempfile::tempdir().unwrap();
+        let filename = directory.path().join("output.txt");
+        std::fs::write(&filename, "original").unwrap();
+        for (status, content_type, body, delay) in [
+            (
+                429,
+                "application/json",
+                r#"{"status":"failed","retry_after":16}"#,
+                Some(30),
+            ),
+            (429, "text/html", "<html>rate limited</html>", Some(30)),
+            (403, "text/html", "<html>forbidden</html>", None),
+            (500, "text/plain", "server error", None),
+            (206, "text/plain", "partial transcript", None),
+        ] {
+            let response = mock_response(
+                status,
+                &format!("Content-Type: {content_type}\r\nRetry-After: 30\r\n"),
+                body,
+            );
+            let result = save_export(response, filename.to_str().unwrap()).unwrap();
+            assert!(!result.ok());
+            assert_eq!(result.status, status);
+            assert_eq!(result.retry_after_seconds, delay);
+            assert_eq!(std::fs::read_to_string(&filename).unwrap(), "original");
+            assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 1);
+        }
+    }
+
+    #[test]
+    fn interrupted_exports_preserve_the_destination_and_remove_temporary_files() {
+        let directory = tempfile::tempdir().unwrap();
+        let filename = directory.path().join("output.txt");
+        for existing in [false, true] {
+            if existing {
+                std::fs::write(&filename, "original").unwrap();
+            }
+            let response =
+                mock_response_with_length(200, "Content-Type: text/plain\r\n", "partial", 100);
+            assert!(save_export(response, filename.to_str().unwrap()).is_err());
+            assert_eq!(filename.exists(), existing);
+            assert_eq!(
+                std::fs::read_dir(directory.path()).unwrap().count(),
+                usize::from(existing)
+            );
+            if existing {
+                assert_eq!(std::fs::read_to_string(&filename).unwrap(), "original");
+            }
+        }
+    }
+
+    #[test]
+    fn completed_exports_replace_existing_files_and_clean_up_on_persist_failure() {
+        let directory = tempfile::tempdir().unwrap();
+        let filename = directory.path().join("output.txt");
+        std::fs::write(&filename, "original").unwrap();
+        let response = mock_response(200, "Content-Type: text/plain\r\n", "complete");
+        assert!(save_export(response, filename.to_str().unwrap())
+            .unwrap()
+            .ok());
+        assert_eq!(std::fs::read_to_string(&filename).unwrap(), "complete");
+        assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 1);
+
+        let blocked = directory.path().join("directory");
+        std::fs::create_dir(&blocked).unwrap();
+        let response = mock_response(200, "Content-Type: text/plain\r\n", "complete");
+        assert!(save_export(response, blocked.to_str().unwrap()).is_err());
+        assert!(blocked.is_dir());
+        assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 2);
     }
 
     #[test]

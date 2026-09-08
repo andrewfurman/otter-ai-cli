@@ -155,35 +155,107 @@ pub fn format_duration(seconds: &Value) -> String {
     format!("{}h {}m", minutes / 60, minutes % 60)
 }
 
-/// Resolve a numeric ID or case-insensitive folder name to a folder ID.
-/// Err carries the ClickException message so `speeches move --create` can catch it.
-pub fn resolve_folder_id(client: &Client, folder_ref: &str) -> Result<String, String> {
+#[derive(Debug, thiserror::Error)]
+pub enum FolderLookupError {
+    #[error("Folder '{0}' not found. Use 'otter folders list' to see available folders.")]
+    NotFound(String),
+    #[error("{0}")]
+    Failed(String),
+}
+
+/// Resolve a numeric ID or case-insensitive folder name. Only a successful,
+/// well-formed folder listing can establish that a folder is missing.
+pub fn resolve_folder_id(client: &Client, folder_ref: &str) -> Result<String, FolderLookupError> {
     if !folder_ref.is_empty() && folder_ref.chars().all(|c| c.is_ascii_digit()) {
         return Ok(folder_ref.to_string());
     }
 
-    let result = api(client.get_folders());
+    let result = client
+        .get_folders()
+        .map_err(|error| FolderLookupError::Failed(format!("Failed to list folders: {error}")))?;
+    find_folder_id(&result, folder_ref)
+}
+
+fn find_folder_id(result: &ApiResponse, folder_ref: &str) -> Result<String, FolderLookupError> {
     if !result.ok() {
-        return Err(format!("Failed to list folders: {}", result_repr(&result)));
+        return Err(FolderLookupError::Failed(format!(
+            "Failed to list folders: {}",
+            result_repr(result)
+        )));
     }
 
-    if let Some(folders) = result.data["folders"].as_array() {
-        for folder in folders {
-            if value_str(&folder["folder_name"]).to_lowercase() == folder_ref.to_lowercase() {
-                return Ok(value_str(&folder["id"]));
-            }
+    let invalid =
+        || FolderLookupError::Failed("Failed to list folders: malformed folder data".into());
+    let folders = result.data["folders"].as_array().ok_or_else(invalid)?;
+    for folder in folders {
+        let name = folder["folder_name"].as_str().ok_or_else(invalid)?;
+        let id = folder_id_of(folder).ok_or_else(invalid)?;
+        if name.to_lowercase() == folder_ref.to_lowercase() {
+            return Ok(id);
         }
     }
 
-    Err(format!(
-        "Folder '{folder_ref}' not found. Use 'otter folders list' to see available folders."
-    ))
+    Err(FolderLookupError::NotFound(folder_ref.to_owned()))
+}
+
+pub fn folder_id_of(folder: &Value) -> Option<String> {
+    let id = value_str(&folder["id"]);
+    (!id.is_empty() && id.chars().all(|c| c.is_ascii_digit())).then_some(id)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn folder_lookup_distinguishes_missing_from_api_and_payload_errors() {
+        for (status, data) in [
+            (429, json!({"status": "failed", "retry_after": 16})),
+            (403, json!({"folders": []})),
+            (500, json!({"folders": []})),
+            (200, json!({"status": "failed", "folders": []})),
+            (200, json!({"status": "OK"})),
+            (200, json!({"folders": [null]})),
+            (200, json!({"folders": [{"folder_name": "Inbox"}]})),
+            (
+                200,
+                json!({"folders": [{"folder_name": "Inbox", "id": "unknown"}]}),
+            ),
+        ] {
+            let result = ApiResponse {
+                status,
+                data,
+                retry_after_seconds: Some(16),
+            };
+            let error = find_folder_id(&result, "Inbox").unwrap_err();
+            assert!(matches!(error, FolderLookupError::Failed(_)));
+            if status == 429 {
+                assert!(error.to_string().contains("at least 16 seconds"));
+            }
+        }
+        for id in [json!(7), json!("7")] {
+            let result = ApiResponse {
+                status: 200,
+                data: json!({"status": "OK", "folders": [{"id": id, "folder_name": "Inbox"}]}),
+                retry_after_seconds: None,
+            };
+            assert_eq!(find_folder_id(&result, "inbox").unwrap(), "7");
+            assert!(matches!(
+                find_folder_id(&result, "New"),
+                Err(FolderLookupError::NotFound(_))
+            ));
+        }
+        let empty = ApiResponse {
+            status: 200,
+            data: json!({"folders": []}),
+            retry_after_seconds: None,
+        };
+        assert!(matches!(
+            find_folder_id(&empty, "New"),
+            Err(FolderLookupError::NotFound(_))
+        ));
+    }
 
     #[test]
     fn transcripts_resolve_metadata_ids_without_changing_the_raw_response() {

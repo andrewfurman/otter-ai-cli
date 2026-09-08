@@ -16,6 +16,4 @@ clap = { version = "4", features = ["derive"] }
 rpassword = "7"
 chrono = { version = "0.4", default-features = false, features = ["alloc"] }
 chrono-tz = "0.10"
-
-[dev-dependencies]
 tempfile = "3"
