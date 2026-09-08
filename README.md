@@ -25,11 +25,81 @@ otter login
 otter speeches list --days 2
 ```
 
-Most commands take `--json` for scripts and agents. `speeches list` and `speeches search` accept `--speaker` to filter by speaker name or id. `otter --help` (and `otter <group> --help`) is the full command surface.
+Most read commands take `--json` for scripts and agents; `speakers tag --json` also returns a batch result. `speeches list` and `speeches search` accept `--speaker` to filter by speaker name or id. `otter --help` and `otter help` show every command and rate-limit guidance. Use `otter <group> --help` or `otter help <group> <command>` for arguments and examples.
 
 CLI speech IDs are Otter **otid** values (from `otter speeches list`), not the internal `speech_id`.
 
 Use this only with an Otter account you are allowed to access, and follow [Otter.ai's Terms of Service](https://otter.ai/terms-of-service).
+
+## Command reference
+
+| Command | Purpose |
+| --- | --- |
+| `otter login` | Authenticate and save credentials; prompts if username/password are omitted |
+| `otter logout` | Clear saved credentials |
+| `otter user` | Show the current account |
+| `otter speeches list` | List conversations; filter by folder, source, days, or speaker |
+| `otter speeches get OTID` | Fetch a conversation and its transcript segments |
+| `otter speeches search QUERY OTID` | Search a transcript, optionally filtering by speaker |
+| `otter speeches rename OTID TITLE` | Change a conversation title |
+| `otter speeches download OTID` | Export txt, pdf, mp3, docx, or srt; comma-separated formats produce a zip |
+| `otter speeches upload FILE` | Upload audio for transcription |
+| `otter speeches trash OTID` | Move a conversation to trash; `--yes` skips confirmation |
+| `otter speeches move OTID1 OTID2 --folder FOLDER` | Move multiple conversations in one session; `--create` creates a missing folder |
+| `otter speakers list` | List known speaker names and IDs |
+| `otter speakers create NAME` | Create a named speaker |
+| `otter speakers tag OTID SPEAKER_ID` | List segments, or tag selected segments with `-t` |
+| `otter folders list` | List folders |
+| `otter folders create NAME` | Create a folder |
+| `otter folders rename FOLDER_ID NAME` | Rename a folder |
+| `otter groups list` | List groups |
+| `otter config show` | Show configuration status with the password masked |
+| `otter config clear` | Clear saved configuration |
+| `otter help [COMMAND]` | Show help, including nested commands such as `help speakers tag` |
+
+Run any command with `--help` for all its flags. Help does not authenticate or contact Otter. The top-level help inventory is generated from the command definitions so new commands appear automatically.
+
+## Tag selected speakers in one session
+
+First identify the correct speaker and review the segment UUIDs. With no `-t` or `--all`, `speakers tag` only lists segments:
+
+```bash
+otter speakers list --json
+otter speeches get OTID --json
+otter speakers tag OTID SPEAKER_ID --json
+```
+
+Then pass all reviewed UUIDs in **one command**, instead of running a separate command for every segment:
+
+```bash
+otter speakers tag OTID SPEAKER_ID -t UUID1 -t UUID2 -t UUID3
+# Comma-separated UUIDs work too:
+otter speakers tag OTID SPEAKER_ID -t UUID1,UUID2,UUID3 --json
+```
+
+Both forms reuse one login, one speaker lookup, one transcript fetch, and one HTTP session for the batch. Each selected segment still requires its own tagging request. Duplicate UUIDs are removed, and the full selection is checked against the conversation before any changes are saved. Existing single-segment `-t UUID` commands still work.
+
+`--all` assigns the selected speaker to **every segment in the conversation**, including other people's turns. It does not mean “all turns belonging to this person.” It cannot be combined with `-t`.
+
+The batch stops on the first API or transport error and exits nonzero. Successful tags remain saved. JSON output reports `tagged_uuids`, `failed_uuid`, `unattempted_uuids`, `error`, and `retry_after_seconds`, along with the conversation and speaker IDs. A failed or interrupted network request may already have saved its change: reload the conversation before retrying that segment, then resume only the necessary IDs. The CLI does not automatically replay mutations.
+
+## Rate limits: findings and operating guidance
+
+The CLI currently authenticates once per command invocation. Separate commands still log in separately; there is no session cache shared between processes. Repeated single-segment tagging therefore sends repeated `/login` requests, even though all tags could use one session. HTTP 429 can occur during login **before the requested operation runs**. Batching selected tags fixes this workflow without adding persistent session-cookie storage.
+
+These are observations from actual cleanup runs, **not an official quota or a guaranteed reset schedule**:
+
+- **June 2026:** a burst of roughly 12–15 authenticated invocations over a couple of minutes hit a login rate limit. A pause of about 2–3 minutes, followed by spacing commands roughly 30 seconds apart, allowed the remaining work to finish.
+- **September 8, 2026:** after several listing/detail/speaker operations, repeated per-segment tag commands hit `/login` HTTP 429. The response included `{"status":"failed","message":"rate limited","retry_after":16}`. Reusing one authenticated session allowed the remaining selected-tag work and verification to complete. This does not imply a limit of 16 requests or a fixed 16-second reset window.
+
+When automating:
+
+1. Batch selected speaker tags with repeated `-t` flags or comma-separated UUIDs. Batch folder moves by passing multiple OTIDs.
+2. On HTTP 429, stop. Honor the server's `Retry-After` header or JSON `retry_after` delay. JSON API error messages surface the delay, and tag batch results include it as `retry_after_seconds`; if both are present, the longer delay is used.
+3. If the server provides no delay, start with a 60–90 second pause, then retry slowly. A longer pause may be necessary. Do not run parallel retry loops or repeatedly log in to check whether the limit has cleared.
+4. Preserve the batch result and reload affected segments before resuming after an error. Some tags may already be saved.
+
+We have not established a requests-per-minute quota, whether all endpoints share a quota, or an exact reset policy. One-session batching reduces avoidable login requests; it does not remove Otter's rate limits on login or other endpoints. Keep this section updated with new observations without including private meeting content, account identifiers, credentials, or session tokens.
 
 ## Develop
 
@@ -42,7 +112,7 @@ cargo clippy --all-targets
 
 When running live mutation tests, upload a throwaway file and trash it afterward.
 
-The API is unofficial and drifts. Response JSON stays untyped on purpose. `finish_speech_upload` needs `appid=otter-web`. The CLI logs in on every command, so a burst of invocations can hit a login rate limit (HTTP 429). Batch where you can (`otter speeches move ID1 ID2 ID3 --folder FOLDER`) and wait about 60–90 seconds on 429.
+The API is unofficial and drifts. Response JSON stays untyped on purpose. `finish_speech_upload` needs `appid=otter-web`. See the rate-limit findings above when scripting or testing against the live service.
 
 ## License
 

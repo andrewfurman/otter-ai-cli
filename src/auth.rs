@@ -32,7 +32,7 @@ pub fn login(username: Option<String>, password: Option<String>) {
     };
     let result = api(client.login(&username, &password));
     if !result.ok() {
-        fail(format!("Login failed: {}", result.data));
+        fail(format!("Login failed: {}", result_repr(&result)));
     }
 
     if let Err(err) = config::save_credentials(&username, &password) {
