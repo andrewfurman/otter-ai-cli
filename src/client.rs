@@ -226,13 +226,20 @@ impl Client {
     }
 
     pub fn set_speech_title(&self, speech_id: &str, title: &str) -> Result<ApiResponse, Error> {
+        let response = self.rename_request(speech_id, title)?.send()?;
+        handle_response(response)
+    }
+
+    fn rename_request(
+        &self,
+        speech_id: &str,
+        title: &str,
+    ) -> Result<reqwest::blocking::RequestBuilder, Error> {
         self.userid()?;
-        let response = self
+        Ok(self
             .http
             .get(format!("{API_BASE_URL}set_speech_title"))
-            .query(&[("otid", speech_id), ("title", title)])
-            .send()?;
-        handle_response(response)
+            .query(&[("otid", speech_id), ("title", title)]))
     }
 
     /// Search a speech via GET `advanced_search`.
@@ -639,6 +646,24 @@ mod tests {
             assert_eq!(request.url().path(), "/forward/api/v1/speeches");
             assert_eq!(request.url().query(), Some(expected));
         }
+    }
+
+    #[test]
+    fn rename_request_preserves_unicode_and_query_punctuation() {
+        let mut client = super::Client::new().unwrap();
+        client.userid = Some("123".into());
+        let title = "Café & plans? + #1";
+        let request = client
+            .rename_request("example-OTID", title)
+            .unwrap()
+            .build()
+            .unwrap();
+        assert_eq!(request.method(), reqwest::Method::GET);
+        assert_eq!(request.url().path(), "/forward/api/v1/set_speech_title");
+        let pairs: Vec<_> = request.url().query_pairs().collect();
+        assert_eq!(pairs.len(), 2);
+        assert_eq!(pairs[0], ("otid".into(), "example-OTID".into()));
+        assert_eq!(pairs[1], ("title".into(), title.into()));
     }
 
     #[test]

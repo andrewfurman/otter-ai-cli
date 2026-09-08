@@ -26,6 +26,7 @@ fn both_root_help_forms_show_every_command_and_rate_guidance() {
             "speeches get",
             "speeches search",
             "speeches rename",
+            "speeches rename-batch",
             "speeches download",
             "speeches upload",
             "speeches trash",
@@ -111,5 +112,21 @@ fn invalid_listing_bounds_fail_before_authentication() {
         assert!(!String::from_utf8(output.stderr)
             .unwrap()
             .contains("Login failed"));
+    }
+}
+
+#[test]
+fn batch_rename_help_explains_preview_conflicts_and_verification() {
+    let text = help(&["speeches", "rename-batch", "--help"]);
+    for phrase in [
+        "old_title",
+        "new_title",
+        "--dry-run",
+        "preview offline",
+        "already-correct",
+        "verifies each save",
+        "unattempted",
+    ] {
+        assert!(text.contains(phrase), "missing {phrase}");
     }
 }

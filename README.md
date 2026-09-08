@@ -44,6 +44,7 @@ Use this only with an Otter account you are allowed to access, and follow [Otter
 | `otter speeches get OTID` | Fetch a conversation and its transcript segments |
 | `otter speeches search QUERY OTID` | Search a transcript, optionally filtering by speaker |
 | `otter speeches rename OTID TITLE` | Change a conversation title |
+| `otter speeches rename-batch PLAN.json` | Validate a rename plan, reuse one login, and verify saved titles; `--dry-run` previews offline |
 | `otter speeches download OTID` | Export txt, pdf, mp3, docx, or srt; comma-separated formats produce a zip |
 | `otter speeches upload FILE` | Upload audio for transcription |
 | `otter speeches trash OTID` | Move a conversation to trash; `--yes` skips confirmation |
@@ -80,6 +81,26 @@ Pass move OTIDs as separate arguments. The CLI removes duplicates and sends one 
 
 Uploads stream the audio file, and downloads stream into a temporary file beside the destination. A download replaces the destination only after the complete HTTP 200 export arrives. HTTP errors, partial responses, and interrupted transfers leave an existing destination unchanged. Temporary files are removed on handled failures. Export errors preserve server retry guidance, including non-JSON rate-limit responses.
 
+## Rename recordings in one session
+
+Save a JSON array with each recording's OTID, exact current title, and proposed title. Use `null` for an untitled recording; `old_title` is required so a stale plan cannot silently overwrite a title that already changed. Unknown fields, duplicate OTIDs, missing fields, and blank new titles fail before authentication.
+
+```json
+[
+  {"otid": "OTID1", "old_title": "Weekly Meeting", "new_title": "Project Weekly Sync on Tue Sep 8th 2026 @ 10:00am ET"},
+  {"otid": "OTID2", "old_title": null, "new_title": "Project Planning on Tue Sep 8th 2026 @ 11:00am ET"}
+]
+```
+
+```bash
+otter speeches rename-batch plan.json --dry-run --json
+otter speeches rename-batch plan.json --json > result.json
+```
+
+Preview only validates and displays the local plan; it does not log in or check current Otter titles. Apply logs in once, reads each recording, skips an already-correct title, checks `old_title`, renames it, and reads it back before counting it as saved. The check and write are separate requests, so this is not an atomic lock against simultaneous edits. Each changed recording uses three API requests, each already-correct recording uses one, and every request shares the same authenticated session.
+
+The first conflict, API/transport error, or failed verification stops the batch without retries and exits nonzero. Progress goes to stderr; `--json` returns one report on stdout with `saved_otids`, `unchanged_otids`, `failed_otid`, `unattempted_otids`, `error`, `retry_after_seconds`, and `unconfirmed_write`. A sent rename can have saved even when its response or verification fails. Reload that recording before retrying. Rerunning a reviewed plan skips already-correct titles and stops on conflicts. Keep the original plan for your audit trail; completed changes are not automatically rolled back. Invalid plans and login failures exit before a batch report is available.
+
 ## Tag selected speakers in one session
 
 First identify the correct speaker and review the segment UUIDs. With no `-t` or `--all`, `speakers tag` only lists segments:
@@ -108,7 +129,7 @@ Commands check Otter's JSON status as well as the HTTP status. An explicit non-`
 
 ## Rate limits: findings and operating guidance
 
-The CLI currently authenticates once per command invocation. Separate commands still log in separately; there is no session cache shared between processes. Repeated single-segment tagging therefore sends repeated `/login` requests, even though all tags could use one session. HTTP 429 can occur during login **before the requested operation runs**. Batching selected tags fixes this workflow without adding persistent session-cookie storage.
+The CLI authenticates once per command invocation. Paginated listings, batch renames, bulk moves, and selected speaker tags each reuse that invocation's session. Separate commands still log in separately; there is no session cache shared between processes. HTTP 429 can occur during login **before the requested operation runs**. Use the batch commands to reduce avoidable logins.
 
 These are observations from actual cleanup runs, **not an official quota or a guaranteed reset schedule**:
 
@@ -117,7 +138,7 @@ These are observations from actual cleanup runs, **not an official quota or a gu
 
 When automating:
 
-1. Batch selected speaker tags with repeated `-t` flags or comma-separated UUIDs. Batch folder moves by passing multiple OTIDs.
+1. Batch selected speaker tags with repeated `-t` flags or comma-separated UUIDs, folder moves with multiple OTIDs, and title changes with `speeches rename-batch`. Listing pages share a login automatically with `--days` or `--all`.
 2. On HTTP 429, stop. Honor the server's `Retry-After` header or JSON `retry_after` delay. API and export error messages surface the delay, and tag batch results include it as `retry_after_seconds`; if both are present, the longer delay is used.
 3. If the server provides no delay, start with a 60–90 second pause, then retry slowly. A longer pause may be necessary. Do not run parallel retry loops or repeatedly log in to check whether the limit has cleared.
 4. Preserve the batch result and reload affected segments before resuming after an error. Some tags may already be saved.
