@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use otter::client::speaker_matches;
@@ -300,6 +301,7 @@ pub fn trash(speech_id: String, yes: bool) {
 }
 
 pub fn move_to_folder(speech_ids: Vec<String>, folder: String, create: bool) {
+    let speech_ids = prepare_move_ids(speech_ids).unwrap_or_else(|message| fail(message));
     let client = authenticated_client();
 
     let folder_id = if !folder.is_empty() && folder.chars().all(|c| c.is_ascii_digit()) {
@@ -326,12 +328,45 @@ pub fn move_to_folder(speech_ids: Vec<String>, folder: String, create: bool) {
     if !result.ok() {
         fail(format!("Failed to move speeches: {}", result_repr(&result)));
     }
+    verify_moved(&speech_ids, &result.data).unwrap_or_else(|message| fail(message));
 
     if speech_ids.len() == 1 {
         println!("Moved speech {} to folder {folder}", speech_ids[0]);
     } else {
         println!("Moved {} speeches to folder {folder}", speech_ids.len());
     }
+}
+
+fn prepare_move_ids(ids: Vec<String>) -> Result<Vec<String>, String> {
+    if ids.is_empty()
+        || ids
+            .iter()
+            .any(|id| id.trim().is_empty() || id.contains(','))
+    {
+        return Err(
+            "Provide nonempty OTIDs separately, without commas; no speeches were moved.".into(),
+        );
+    }
+    let mut seen = HashSet::new();
+    Ok(ids
+        .into_iter()
+        .filter(|id| seen.insert(id.clone()))
+        .collect())
+}
+
+fn verify_moved(requested: &[String], data: &Value) -> Result<(), String> {
+    let added = data["added_speech_otids"].as_array()
+        .and_then(|ids| ids.iter().map(Value::as_str).collect::<Option<HashSet<_>>>())
+        .ok_or_else(|| "Move response has no valid added_speech_otids list; completion is unconfirmed. Reload the recordings before retrying.".to_string())?;
+    let (confirmed, unconfirmed): (Vec<_>, Vec<_>) = requested
+        .iter()
+        .map(String::as_str)
+        .partition(|id| added.contains(id));
+    if !unconfirmed.is_empty() {
+        return Err(format!("Move confirmed for {}/{} recordings.\nConfirmed OTIDs: {}\nUnconfirmed OTIDs: {}\nReload the unconfirmed recordings before retrying; no automatic retry was attempted.",
+            confirmed.len(), requested.len(), confirmed.join(","), unconfirmed.join(",")));
+    }
+    Ok(())
 }
 
 fn speaker_names(speakers: &Value) -> Vec<String> {
@@ -412,6 +447,43 @@ fn filter_segments_by_speaker_and_query(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn move_selection_deduplicates_and_rejects_invalid_ids() {
+        assert_eq!(
+            prepare_move_ids(vec!["a".into(), "b".into(), "a".into()]).unwrap(),
+            ["a", "b"]
+        );
+        for ids in [vec![], vec!["  ".into()], vec!["a,b".into()]] {
+            assert!(prepare_move_ids(ids).is_err());
+        }
+    }
+
+    #[test]
+    fn move_requires_every_requested_id_to_be_acknowledged() {
+        let requested = vec!["a".into(), "b".into()];
+        assert!(verify_moved(&requested, &json!({"added_speech_otids": ["b", "a", "a"]})).is_ok());
+        let error = verify_moved(
+            &requested,
+            &json!({"status": "OK", "added_speech_otids": ["b"]}),
+        )
+        .unwrap_err();
+        assert!(error.contains("1/2"));
+        assert!(error.contains("Confirmed OTIDs: b"));
+        assert!(error.contains("Unconfirmed OTIDs: a"));
+        for data in [
+            json!({}),
+            json!({"added_speech_otids": null}),
+            json!({"added_speech_otids": [42]}),
+        ] {
+            assert!(verify_moved(&requested, &data)
+                .unwrap_err()
+                .contains("completion is unconfirmed"));
+        }
+        assert!(verify_moved(&requested, &json!({"added_speech_otids": []}))
+            .unwrap_err()
+            .contains("0/2"));
+    }
 
     #[test]
     fn listing_warning_reports_incomplete_and_unknown_windows() {
