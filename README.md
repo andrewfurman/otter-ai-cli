@@ -149,10 +149,18 @@ We have not established a requests-per-minute quota, whether all endpoints share
 
 ```bash
 cargo build
-cargo test                  # live API tests skip unless OTTERAI_USERNAME/OTTERAI_PASSWORD are set
+cargo test                  # offline suite; reports the live smoke test as ignored
 cargo fmt --all
 cargo clippy --all-targets
 ```
+
+The live smoke test is explicitly ignored by default, even when credentials are present. To run it, securely supply nonempty `OTTERAI_USERNAME` and `OTTERAI_PASSWORD` environment variables, then run:
+
+```bash
+cargo test --test live -- --ignored --nocapture
+```
+
+This single read-only test logs in once and checks the account, conversations, folders, speakers, and groups sequentially through the same client. It stops on the first failed check without retrying. HTTP/API failures show the failing stage, HTTP status, and retry delay when available; raw response bodies and credentials are not printed. An explicit run without credentials fails before any requests instead of silently passing. Follow the rate-limit guidance above before rerunning a failed smoke test. It does not read saved CLI credentials automatically or change any recordings.
 
 When running live mutation tests, upload a throwaway file and trash it afterward.
 
