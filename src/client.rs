@@ -18,8 +18,8 @@ pub enum Error {
         #[source]
         source: reqwest::Error,
     },
-    #[error("unexpected response (HTTP {status}): expected {expected}")]
-    UnexpectedResponse { status: u16, expected: &'static str },
+    #[error("unexpected Otter API response (HTTP {status}): expected {expected}. The API may have changed. Check affected data before retrying a write.")]
+    UnexpectedResponse { status: u16, expected: String },
     #[error("{0}")]
     Io(#[from] std::io::Error),
     #[error("userid is invalid")]
@@ -52,6 +52,32 @@ impl ApiResponse {
                     .is_some_and(|status| status.eq_ignore_ascii_case("OK"))
             })
     }
+
+    /// Validate only fields needed by this endpoint. Keep explicit failures and
+    /// their retry guidance intact, and allow additional server fields.
+    fn require(self, expected: &str, valid: impl FnOnce(&Value) -> bool) -> Result<Self, Error> {
+        if self.ok() && !valid(&self.data) {
+            return Err(Error::UnexpectedResponse {
+                status: self.status,
+                expected: expected.into(),
+            });
+        }
+        Ok(self)
+    }
+
+    fn require_array(self, field: &str) -> Result<Self, Error> {
+        self.require(&format!("{field} array of objects"), |data| {
+            data[field]
+                .as_array()
+                .is_some_and(|items| items.iter().all(Value::is_object))
+        })
+    }
+
+    fn require_speech(self, speech_id: &str) -> Result<Self, Error> {
+        self.require("speech.speech object with the requested otid", |data| {
+            data["speech"]["otid"].as_str() == Some(speech_id) && !speech_id.is_empty()
+        })
+    }
 }
 
 fn handle_response(response: reqwest::blocking::Response) -> Result<ApiResponse, Error> {
@@ -70,7 +96,7 @@ fn handle_response(response: reqwest::blocking::Response) -> Result<ApiResponse,
     if status == 200 && !data.is_object() && !data.is_array() {
         return Err(Error::UnexpectedResponse {
             status,
-            expected: "a JSON object or array",
+            expected: "a JSON object or array".into(),
         });
     }
     let retry_after_seconds = if status == 429 {
@@ -83,6 +109,33 @@ fn handle_response(response: reqwest::blocking::Response) -> Result<ApiResponse,
         data,
         retry_after_seconds,
     })
+}
+
+fn handle_acknowledgement(
+    response: reqwest::blocking::Response,
+    endpoint: &str,
+) -> Result<ApiResponse, Error> {
+    handle_response(response)?.require(
+        &format!("{endpoint}: status OK acknowledgement (write completion is unconfirmed)"),
+        |data| data.get("status").is_some(),
+    )
+}
+
+fn numeric_id(value: &Value) -> Option<String> {
+    match value {
+        Value::Number(number) => number
+            .as_u64()
+            .filter(|id| *id > 0)
+            .map(|id| id.to_string()),
+        Value::String(id)
+            if !id.is_empty()
+                && id.bytes().all(|byte| byte.is_ascii_digit())
+                && id.bytes().any(|byte| byte != b'0') =>
+        {
+            Some(id.clone())
+        }
+        _ => None,
+    }
 }
 
 fn retry_delay(header: Option<&str>, data: &Value, now: std::time::SystemTime) -> Option<u64> {
@@ -142,6 +195,7 @@ impl Client {
 
     /// GET /login with HTTP Basic auth; the username is also passed as a query param.
     pub fn login(&mut self, username: &str, password: &str) -> Result<ApiResponse, Error> {
+        self.userid = None;
         let response = self
             .http
             .get(format!("{API_BASE_URL}login"))
@@ -149,12 +203,17 @@ impl Client {
             .basic_auth(username, Some(password))
             .send()?;
 
-        let result = handle_response(response)?;
+        self.accept_login(handle_response(response)?)
+    }
+
+    fn accept_login(&mut self, result: ApiResponse) -> Result<ApiResponse, Error> {
+        self.userid = None;
+        let result = result.require(
+            "login.userid as a positive integer or digit string",
+            |data| numeric_id(&data["userid"]).is_some(),
+        )?;
         if result.ok() {
-            self.userid = Some(match &result.data["userid"] {
-                Value::String(s) => s.clone(),
-                other => other.to_string(),
-            });
+            self.userid = numeric_id(&result.data["userid"]);
         }
         Ok(result)
     }
@@ -170,7 +229,7 @@ impl Client {
             .get(format!("{API_BASE_URL}speakers"))
             .query(&[("userid", self.userid()?)])
             .send()?;
-        handle_response(response)
+        handle_response(response)?.require_array("speakers")
     }
 
     pub fn get_speeches(
@@ -222,12 +281,12 @@ impl Client {
             .get(format!("{API_BASE_URL}speech"))
             .query(&[("userid", self.userid()?), ("otid", speech_id)])
             .send()?;
-        handle_response(response)
+        handle_response(response)?.require_speech(speech_id)
     }
 
     pub fn set_speech_title(&self, speech_id: &str, title: &str) -> Result<ApiResponse, Error> {
         let response = self.rename_request(speech_id, title)?.send()?;
-        handle_response(response)
+        handle_acknowledgement(response, "set_speech_title")
     }
 
     fn rename_request(
@@ -339,7 +398,7 @@ impl Client {
                 ("appid", "otter-web"),
             ])
             .send()?;
-        handle_response(response)
+        handle_acknowledgement(response, "finish_speech_upload")
     }
 
     /// Downloads to the exact output path, defaulting to `<speech_id>.<ext>`.
@@ -371,7 +430,7 @@ impl Client {
             .header("referer", "https://otter.ai/")
             .form(&[("otid", speech_id)])
             .send()?;
-        handle_response(response)
+        handle_acknowledgement(response, "move_to_trash_bin")
     }
 
     pub fn create_speaker(&self, speaker_name: &str) -> Result<ApiResponse, Error> {
@@ -383,7 +442,7 @@ impl Client {
             .header("referer", "https://otter.ai/")
             .form(&[("speaker_name", speaker_name)])
             .send()?;
-        handle_response(response)
+        handle_acknowledgement(response, "create_speaker")
     }
 
     pub fn set_transcript_speaker(
@@ -411,7 +470,7 @@ impl Client {
             .header("referer", "https://otter.ai/")
             .header("x-csrftoken", self.csrf_token())
             .send()?;
-        handle_response(response)
+        handle_acknowledgement(response, "set_transcript_speaker")
     }
 
     pub fn list_groups(&self) -> Result<ApiResponse, Error> {
@@ -429,7 +488,7 @@ impl Client {
             .get(format!("{API_BASE_URL}folders"))
             .query(&[("userid", self.userid()?)])
             .send()?;
-        handle_response(response)
+        handle_response(response)?.require_array("folders")
     }
 
     pub fn create_folder(&self, folder_name: &str) -> Result<ApiResponse, Error> {
@@ -441,7 +500,10 @@ impl Client {
             .header("referer", "https://otter.ai/")
             .form(&[("folder_name", folder_name)])
             .send()?;
-        handle_response(response)
+        handle_acknowledgement(response, "create_folder")?
+            .require("create_folder.folder.id", |data| {
+                numeric_id(&data["folder"]["id"]).is_some()
+            })
     }
 
     pub fn rename_folder(&self, folder_id: &str, new_name: &str) -> Result<ApiResponse, Error> {
@@ -453,7 +515,7 @@ impl Client {
             .header("referer", "https://otter.ai/")
             .form(&[("new_name", new_name)])
             .send()?;
-        handle_response(response)
+        handle_acknowledgement(response, "rename_folder")
     }
 
     pub fn add_folder_speeches(
@@ -462,7 +524,7 @@ impl Client {
         speech_ids: &[String],
     ) -> Result<ApiResponse, Error> {
         let response = self.move_request(folder_id, speech_ids)?.send()?;
-        handle_response(response)
+        handle_acknowledgement(response, "add_folder_speeches")
     }
 
     fn move_request(
@@ -509,19 +571,28 @@ fn save_export(
     }
     // Export formats are files, but Otter may instead send a JSON rejection
     // with HTTP 200. Never save that error as the requested output file.
-    if response
+    let content_type = response
         .headers()
         .get(reqwest::header::CONTENT_TYPE)
         .and_then(|value| value.to_str().ok())
-        .is_some_and(is_json_content_type)
-    {
+        .map(media_type);
+    if matches!(
+        content_type.as_deref(),
+        Some("text/html" | "application/xhtml+xml")
+    ) {
+        return Err(Error::UnexpectedResponse {
+            status: 200,
+            expected: "an export file, received an HTML page".into(),
+        });
+    }
+    if content_type.as_deref().is_some_and(is_json_content_type) {
         let result = handle_response(response)?;
         if !result.ok() {
             return Ok(result);
         }
         return Err(Error::UnexpectedResponse {
             status: result.status,
-            expected: "an export file, not JSON",
+            expected: "an export file, not JSON".into(),
         });
     }
 
@@ -547,13 +618,17 @@ fn save_export(
     })
 }
 
-fn is_json_content_type(value: &str) -> bool {
-    let media_type = value
+fn media_type(value: &str) -> String {
+    value
         .split(';')
         .next()
         .unwrap_or_default()
         .trim()
-        .to_ascii_lowercase();
+        .to_ascii_lowercase()
+}
+
+fn is_json_content_type(value: &str) -> bool {
+    let media_type = media_type(value);
     media_type == "application/json" || media_type.ends_with("+json")
 }
 
@@ -601,7 +676,8 @@ fn xml_tag<'a>(xml: &'a str, tag: &str) -> Option<&'a str> {
 #[cfg(test)]
 mod tests {
     use super::{
-        export_filename, handle_response, retry_delay, save_export, speaker_matches, xml_tag, Error,
+        export_filename, handle_acknowledgement, handle_response, retry_delay, save_export,
+        speaker_matches, xml_tag, Client, Error,
     };
     use serde_json::json;
 
@@ -776,6 +852,133 @@ mod tests {
     }
 
     #[test]
+    fn login_requires_a_valid_userid_and_clears_previous_identity_on_failure() {
+        let mut client = Client::new().unwrap();
+        for data in [
+            json!({"status": "OK"}),
+            json!({"userid": null}),
+            json!({"userid": false}),
+            json!({"userid": {"id": 123}}),
+            json!({"userid": []}),
+            json!({"userid": -1}),
+            json!({"userid": 0}),
+            json!({"userid": 1.5}),
+            json!({"userid": ""}),
+            json!({"userid": " "}),
+            json!({"userid": "null"}),
+            json!({"userid": "000"}),
+        ] {
+            client.userid = Some("previous-user".into());
+            let response = handle_response(mock_response(200, "", &data.to_string())).unwrap();
+            let error = client.accept_login(response).unwrap_err().to_string();
+            assert!(error.contains("login.userid"));
+            assert!(error.contains("API may have changed"));
+            assert!(matches!(client.userid(), Err(Error::InvalidUserId)));
+        }
+        for id in [json!(123), json!("123")] {
+            let body = json!({"userid": id, "extra": "allowed"}).to_string();
+            let response = handle_response(mock_response(200, "", &body)).unwrap();
+            assert!(client.accept_login(response).unwrap().ok());
+            assert_eq!(client.userid().unwrap(), "123");
+        }
+        let response =
+            handle_response(mock_response(429, "Retry-After: 30\r\n", "error page")).unwrap();
+        let result = client.accept_login(response).unwrap();
+        assert!(!result.ok());
+        assert_eq!(result.retry_after_seconds, Some(30));
+        assert!(client.userid().is_err());
+    }
+
+    #[test]
+    fn missing_or_malformed_lists_fail_but_empty_lists_and_extra_fields_work() {
+        for field in ["folders", "speakers"] {
+            for data in [
+                json!({}),
+                json!({"status": "OK"}),
+                json!({(field): null}),
+                json!({(field): {}}),
+                json!({(field): [null]}),
+                json!({(field): ["changed shape"]}),
+            ] {
+                let result = handle_response(mock_response(200, "", &data.to_string())).unwrap();
+                let error = result.require_array(field).unwrap_err().to_string();
+                assert!(error.contains(field));
+            }
+            for items in [json!([]), json!([{"id": 123, "extra": "allowed"}])] {
+                let data = json!({(field): items, "extra": true});
+                let result = handle_response(mock_response(200, "", &data.to_string())).unwrap();
+                assert_eq!(result.require_array(field).unwrap().data, data);
+            }
+        }
+    }
+
+    #[test]
+    fn speech_details_require_the_requested_recording_but_allow_optional_metadata() {
+        for data in [
+            json!({}),
+            json!({"speech": null}),
+            json!({"speech": []}),
+            json!({"speech": {}}),
+            json!({"speech": {"otid": 123}}),
+            json!({"speech": {"otid": "another-recording"}}),
+        ] {
+            let result = handle_response(mock_response(200, "", &data.to_string())).unwrap();
+            assert!(result.require_speech("fixture").is_err());
+        }
+        // A new/processing recording need not have a title or transcript yet.
+        let data = json!({"speech": {"otid": "fixture", "extra": true}});
+        let result = handle_response(mock_response(200, "", &data.to_string())).unwrap();
+        assert_eq!(result.require_speech("fixture").unwrap().data, data);
+    }
+
+    #[test]
+    fn mutations_require_an_explicit_ok_acknowledgement() {
+        for body in ["{}", "[]", r#"{"success":true}"#] {
+            let error = handle_acknowledgement(mock_response(200, "", body), "set_speech_title")
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains("set_speech_title"));
+            assert!(error.contains("completion is unconfirmed"));
+        }
+        for body in [r#"{"status":"OK"}"#, r#"{"status":"ok","extra":true}"#] {
+            assert!(
+                handle_acknowledgement(mock_response(200, "", body), "set_speech_title")
+                    .unwrap()
+                    .ok()
+            );
+        }
+    }
+
+    #[test]
+    fn required_field_checks_preserve_api_failures_and_retry_guidance() {
+        for (status, body, retry) in [
+            (
+                200,
+                r#"{"status":"failed","message":"permission denied"}"#,
+                None,
+            ),
+            (403, "<html>forbidden</html>", None),
+            (429, "<html>rate limited</html>", Some(30)),
+        ] {
+            let result = handle_acknowledgement(
+                mock_response(status, "Retry-After: 30\r\n", body),
+                "create_folder",
+            )
+            .unwrap()
+            .require_array("folders")
+            .unwrap()
+            .require_speech("fixture")
+            .unwrap();
+            assert!(!result.ok());
+            assert_eq!(result.status, status);
+            assert_eq!(result.retry_after_seconds, retry);
+            if status == 200 {
+                assert_eq!(result.data["message"], "permission denied");
+            }
+        }
+    }
+
+    #[test]
     fn malformed_success_responses_are_errors() {
         for body in ["", "<html>upstream error</html>", "{"] {
             assert!(matches!(
@@ -833,22 +1036,57 @@ mod tests {
     }
 
     #[test]
+    fn html_export_pages_never_create_or_overwrite_files() {
+        let directory = tempfile::tempdir().unwrap();
+        for existing in [false, true] {
+            let filename = directory.path().join("export.txt");
+            if existing {
+                std::fs::write(&filename, "original export").unwrap();
+            }
+            for content_type in [
+                "text/html",
+                "Text/HTML; charset=UTF-8",
+                "application/xhtml+xml",
+            ] {
+                let response = mock_response(
+                    200,
+                    &format!("Content-Type: {content_type}\r\nContent-Disposition: attachment; filename=export.txt\r\n"),
+                    "<html>login required</html>",
+                );
+                let error = save_export(response, filename.to_str().unwrap())
+                    .unwrap_err()
+                    .to_string();
+                assert!(error.contains("HTML page"));
+                assert_eq!(filename.exists(), existing);
+                assert_eq!(
+                    std::fs::read_dir(directory.path()).unwrap().count(),
+                    usize::from(existing)
+                );
+                if existing {
+                    assert_eq!(
+                        std::fs::read_to_string(&filename).unwrap(),
+                        "original export"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
     fn successful_exports_still_write_file_bytes() {
         let directory = tempfile::tempdir().unwrap();
         let filename = directory.path().join("transcript.txt");
-        // JSON-looking text is a legitimate transcript when served as a file.
-        let response = mock_response(
-            200,
-            "Content-Type: text/plain\r\n",
+        // Transcript text may legitimately discuss JSON or HTML.
+        for body in [
             r#"{"a transcript can contain JSON": true}"#,
-        );
-        let result = save_export(response, filename.to_str().unwrap()).unwrap();
-        assert!(result.ok());
-        assert_eq!(result.data["filename"], filename.to_str().unwrap());
-        assert_eq!(
-            std::fs::read_to_string(filename).unwrap(),
-            r#"{"a transcript can contain JSON": true}"#
-        );
+            "<html>example discussed in the meeting</html>",
+        ] {
+            let response = mock_response(200, "Content-Type: text/plain\r\n", body);
+            let result = save_export(response, filename.to_str().unwrap()).unwrap();
+            assert!(result.ok());
+            assert_eq!(result.data["filename"], filename.to_str().unwrap());
+            assert_eq!(std::fs::read_to_string(&filename).unwrap(), body);
+        }
     }
 
     #[test]

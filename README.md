@@ -127,6 +127,10 @@ The batch stops on the first API or transport error and exits nonzero. Successfu
 
 Commands check Otter's JSON status as well as the HTTP status. An explicit non-`OK` API status fails even with HTTP 200, and malformed JSON success responses fail instead of becoming empty results. JSON export errors are reported before writing an output file. API and export HTTP errors retain their status and retry guidance when the server sends a non-JSON error page.
 
+Login requires a valid user ID; folder/speaker lists require arrays of objects, and conversation details must identify the requested OTID. A missing or malformed required field exits nonzero with an unexpected-response error indicating that the API may have changed. Empty lists, extra fields, and optional conversation metadata remain supported. Writes require an explicit `status: OK` acknowledgement, and folder creation must return a valid folder ID. A missing acknowledgement leaves completion unconfirmed: reload affected data before retrying. No automatic mutation retries are added.
+
+Exports served as `text/html` or `application/xhtml+xml` are rejected before creating or replacing a file, even with HTTP 200. Detection uses the response's Content-Type; ordinary transcript text containing HTML or JSON remains valid. This catches declared HTML login/error pages, without attempting to guess every possible API change or incorrectly labelled response.
+
 ## Rate limits: findings and operating guidance
 
 The CLI authenticates once per command invocation. Paginated listings, batch renames, bulk moves, and selected speaker tags each reuse that invocation's session. Separate commands still log in separately; there is no session cache shared between processes. HTTP 429 can occur during login **before the requested operation runs**. Use the batch commands to reduce avoidable logins.
