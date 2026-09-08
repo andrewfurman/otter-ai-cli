@@ -5,7 +5,28 @@ mod speakers;
 mod speeches;
 mod util;
 
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, FromArgMatches, Parser, Subcommand};
+
+const RATE_LIMIT_HELP: &str = "Rate limits (observed, not an official quota):
+  Separate authenticated commands each log in again. Bursts can receive HTTP 429
+  from /login before the requested operation runs. Batch selected speaker tags
+  with repeated -t UUID flags or -t UUID1,UUID2; batch folder moves with multiple IDs.
+  On 429, stop and honor Retry-After / retry_after. If no delay is supplied, wait
+  60-90 seconds, then retry slowly. Longer pauses may be needed; avoid parallel
+  retry loops. A tag batch stops on its first error and reports saved/unattempted IDs.
+  No fixed requests-per-minute limit has been established. See README for findings.";
+
+const TAG_HELP: &str = "Examples:
+  otter speakers tag OTID SPEAKER_ID              List segments without changing them
+  otter speakers tag OTID SPEAKER_ID -t UUID1 -t UUID2
+  otter speakers tag OTID SPEAKER_ID -t UUID1,UUID2 --json
+
+Selected segments share one login and one HTTP session. Duplicate UUIDs are
+removed, and every UUID is checked against this conversation before any tags save.
+--all assigns the chosen speaker to EVERY segment, including other people's turns.
+On HTTP 429, stop and honor Retry-After / retry_after; without a delay, wait 60-90
+seconds and retry slowly. The batch stops on its first error, reports progress,
+and exits nonzero. Reload a failed segment before retrying an uncertain write.";
 
 #[derive(Parser)]
 #[command(
@@ -144,16 +165,17 @@ enum SpeakersCommand {
     /// Create a new speaker
     Create { name: String },
     /// Tag a speaker on transcript segment(s)
+    #[command(after_help = TAG_HELP)]
     Tag {
         speech_id: String,
         speaker_id: String,
-        /// Specific transcript UUID to tag
-        #[arg(short, long)]
-        transcript_uuid: Option<String>,
-        /// Tag all segments with this speaker
-        #[arg(short, long)]
+        /// Transcript UUID(s) to tag; repeat -t or separate UUIDs with commas
+        #[arg(short, long, value_delimiter = ',', value_parser = clap::builder::NonEmptyStringValueParser::new())]
+        transcript_uuid: Vec<String>,
+        /// Assign this speaker to EVERY segment in the conversation
+        #[arg(short, long, conflicts_with = "transcript_uuid")]
         all: bool,
-        /// Output as JSON
+        /// Output segment listings or batch results as JSON
         #[arg(long)]
         json: bool,
     },
@@ -196,8 +218,35 @@ enum ConfigCommand {
     Clear,
 }
 
+fn cli_command() -> clap::Command {
+    let command = Cli::command();
+    let mut inventory =
+        String::from("All commands (use any command's --help for its arguments):\n");
+    command_inventory(&command, "otter", &mut inventory);
+    inventory.push_str("  otter help [COMMAND]  Show help for a command or group\n\n");
+    inventory.push_str(RATE_LIMIT_HELP);
+    command.after_help(inventory)
+}
+
+fn command_inventory(command: &clap::Command, prefix: &str, output: &mut String) {
+    for subcommand in command.get_subcommands() {
+        let path = format!("{prefix} {}", subcommand.get_name());
+        if subcommand.has_subcommands() {
+            command_inventory(subcommand, &path, output);
+        } else {
+            let about = subcommand
+                .get_about()
+                .map(|s| s.to_string())
+                .unwrap_or_default();
+            output.push_str(&format!("  {path:<26} {about}\n"));
+        }
+    }
+}
+
 fn main() {
-    match Cli::parse().command {
+    let matches = cli_command().get_matches();
+    let cli = Cli::from_arg_matches(&matches).unwrap_or_else(|error| error.exit());
+    match cli.command {
         Command::Login { username, password } => auth::login(username, password),
         Command::Logout => auth::logout(),
         Command::User => auth::user(),
@@ -264,6 +313,38 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tag_accepts_repeated_and_comma_separated_uuids() {
+        let cli = Cli::try_parse_from([
+            "otter", "speakers", "tag", "otid", "42", "-t", "a,b", "-t", "c", "--json",
+        ])
+        .unwrap();
+        match cli.command {
+            Command::Speakers(SpeakersCommand::Tag {
+                transcript_uuid,
+                all,
+                json,
+                ..
+            }) => {
+                assert_eq!(transcript_uuid, ["a", "b", "c"]);
+                assert!(!all);
+                assert!(json);
+            }
+            _ => panic!("expected speakers tag"),
+        }
+    }
+
+    #[test]
+    fn tag_rejects_all_with_selected_uuids_and_empty_values() {
+        assert!(Cli::try_parse_from([
+            "otter", "speakers", "tag", "otid", "42", "-t", "a", "--all"
+        ])
+        .is_err());
+        assert!(
+            Cli::try_parse_from(["otter", "speakers", "tag", "otid", "42", "-t", "a,,b"]).is_err()
+        );
+    }
 
     #[test]
     fn list_and_search_accept_speaker_flag() {

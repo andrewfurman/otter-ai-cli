@@ -27,6 +27,8 @@ pub enum Error {
 pub struct ApiResponse {
     pub status: u16,
     pub data: Value,
+    /// Server-requested delay on HTTP 429, from Retry-After or JSON retry_after.
+    pub retry_after_seconds: Option<u64>,
 }
 
 impl ApiResponse {
@@ -37,9 +39,39 @@ impl ApiResponse {
 
 fn handle_response(response: reqwest::blocking::Response) -> Result<ApiResponse, Error> {
     let status = response.status().as_u16();
+    let retry_after = response
+        .headers()
+        .get(reqwest::header::RETRY_AFTER)
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_owned);
     // Like the Python client: a non-JSON body becomes an empty data dict.
     let data = response.json().unwrap_or_else(|_| json!({}));
-    Ok(ApiResponse { status, data })
+    let retry_after_seconds = if status == 429 {
+        retry_delay(retry_after.as_deref(), &data, std::time::SystemTime::now())
+    } else {
+        None
+    };
+    Ok(ApiResponse {
+        status,
+        data,
+        retry_after_seconds,
+    })
+}
+
+fn retry_delay(header: Option<&str>, data: &Value, now: std::time::SystemTime) -> Option<u64> {
+    let from_header = header.and_then(|value| {
+        let value = value.trim();
+        value.parse::<u64>().ok().or_else(|| {
+            let date = chrono::DateTime::parse_from_rfc2822(value).ok()?;
+            let now = now.duration_since(std::time::UNIX_EPOCH).ok()?.as_secs();
+            Some((date.timestamp().max(0) as u64).saturating_sub(now))
+        })
+    });
+    let from_body = data["retry_after"]
+        .as_u64()
+        .or_else(|| data["retry_after"].as_str()?.trim().parse::<u64>().ok());
+    // If both are present, honor the longer delay.
+    from_header.into_iter().chain(from_body).max()
 }
 
 pub struct Client {
@@ -282,6 +314,7 @@ impl Client {
         Ok(ApiResponse {
             status,
             data: Value::Object(data),
+            retry_after_seconds: None,
         })
     }
 
@@ -443,8 +476,71 @@ fn xml_tag<'a>(xml: &'a str, tag: &str) -> Option<&'a str> {
 
 #[cfg(test)]
 mod tests {
-    use super::{speaker_matches, xml_tag};
+    use super::{handle_response, retry_delay, speaker_matches, xml_tag};
     use serde_json::json;
+
+    #[test]
+    fn retry_delays_accept_headers_json_and_http_dates() {
+        let now = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1672531200);
+        assert_eq!(
+            retry_delay(Some("30"), &json!({"retry_after": 16}), now),
+            Some(30)
+        );
+        assert_eq!(
+            retry_delay(Some("5"), &json!({"retry_after": "16"}), now),
+            Some(16)
+        );
+        assert_eq!(
+            retry_delay(Some("Sun, 01 Jan 2023 00:01:00 GMT"), &json!({}), now),
+            Some(60)
+        );
+        assert_eq!(
+            retry_delay(Some("Sat, 31 Dec 2022 23:59:00 GMT"), &json!({}), now),
+            Some(0)
+        );
+        assert_eq!(
+            retry_delay(Some("invalid"), &json!({"retry_after": -1}), now),
+            None
+        );
+        assert_eq!(
+            retry_delay(None, &json!({"retry_after": 16}), now),
+            Some(16)
+        );
+        assert_eq!(retry_delay(None, &json!({}), now), None);
+    }
+
+    #[test]
+    fn http_response_preserves_rate_limit_header_and_body() {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut socket, _) = listener.accept().unwrap();
+            socket
+                .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+                .unwrap();
+            let mut buffer = [0; 4096];
+            let mut request = Vec::new();
+            while !request.windows(4).any(|bytes| bytes == b"\r\n\r\n") {
+                let count = socket.read(&mut buffer).unwrap();
+                assert!(count > 0, "request ended before its headers");
+                request.extend_from_slice(&buffer[..count]);
+            }
+            let body = r#"{"status":"failed","retry_after":16}"#;
+            write!(socket, "HTTP/1.1 429 Too Many Requests\r\nRetry-After: 30\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", body.len(), body).unwrap();
+        });
+        let client = reqwest::blocking::Client::builder()
+            .no_proxy()
+            .timeout(std::time::Duration::from_secs(5))
+            .build()
+            .unwrap();
+        let result =
+            handle_response(client.get(format!("http://{address}/")).send().unwrap()).unwrap();
+        server.join().unwrap();
+        assert_eq!(result.status, 429);
+        assert_eq!(result.retry_after_seconds, Some(30));
+        assert_eq!(result.data["retry_after"], 16);
+    }
 
     #[test]
     fn xml_tag_extracts_s3_fields() {

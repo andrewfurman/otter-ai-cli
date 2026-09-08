@@ -43,7 +43,19 @@ pub fn truthy(value: &Value) -> bool {
 
 /// Render an ApiResponse the way Python's f"{result}" shows the response dict.
 pub fn result_repr(result: &ApiResponse) -> String {
-    format!("{{'status': {}, 'data': {}}}", result.status, result.data)
+    let mut message = format!("{{'status': {}, 'data': {}}}", result.status, result.data);
+    if result.status == 429 {
+        let wait = match result.retry_after_seconds {
+            Some(seconds) => format!("at least {seconds} seconds"),
+            None => "60-90 seconds (no server delay supplied)".to_string(),
+        };
+        message.push_str(&format!(
+            "\nRate limited. Stop and wait {wait}, then retry slowly. \
+            Separate commands each log in; batch selected tags with repeated -t UUID flags. \
+            See otter --help for rate-limit guidance."
+        ));
+    }
+    message
 }
 
 /// click.ClickException style: "Error: <msg>" on stderr, exit 1.
