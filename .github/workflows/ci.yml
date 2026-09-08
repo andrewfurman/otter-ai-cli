@@ -31,7 +31,7 @@ jobs:
             - name: Lint
               run: cargo clippy --all-targets -- -D warnings
 
-            # Unit tests. The live API tests (tests/live.rs) skip themselves
-            # here because OTTERAI_USERNAME/OTTERAI_PASSWORD are not set in CI.
+            # Offline tests. The live smoke test is explicitly #[ignore] and
+            # only runs when requested with --ignored, even if credentials exist.
             - name: Run tests
               run: cargo test

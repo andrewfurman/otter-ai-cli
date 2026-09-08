@@ -1,55 +1,56 @@
-//! Live tests against the real Otter.ai API, gated on credentials in the
-//! environment like the Python suite (OTTERAI_USERNAME / OTTERAI_PASSWORD).
+//! Opt-in, read-only smoke test against the real Otter.ai API.
+//! Run explicitly with: cargo test --test live -- --ignored --nocapture
 
-use otter::Client;
+use otter::{ApiResponse, Client, Error};
+use serde_json::Value;
 
-fn live_client() -> Option<Client> {
-    let (Ok(username), Ok(password)) = (
-        std::env::var("OTTERAI_USERNAME"),
-        std::env::var("OTTERAI_PASSWORD"),
-    ) else {
-        eprintln!("skipping live test: OTTERAI_USERNAME/OTTERAI_PASSWORD not set");
-        return None;
-    };
-    let mut client = Client::new().unwrap();
-    let result = client.login(&username, &password).unwrap();
-    assert_eq!(result.status, 200);
-    assert_eq!(result.data["email"].as_str(), Some(username.as_str()));
-    Some(client)
+fn required_credential(name: &str) -> String {
+    std::env::var(name)
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| panic!("Set {name} before explicitly running the live smoke test"))
+}
+
+fn checked(stage: &str, response: Result<ApiResponse, Error>) -> Value {
+    // Never print raw responses, credentials, cookies, or request URLs.
+    let response = response.unwrap_or_else(|_| {
+        panic!("{stage} failed with a transport or response error; stopping live smoke test")
+    });
+    assert!(
+        response.ok(),
+        "{stage} failed (HTTP {}; retry_after_seconds={:?}); stopping without retries",
+        response.status,
+        response.retry_after_seconds,
+    );
+    response.data
 }
 
 #[test]
-fn live_login() {
-    let Some(_client) = live_client() else { return };
-}
+#[ignore = "live Otter API: opt in with --ignored and set OTTERAI_USERNAME/OTTERAI_PASSWORD"]
+fn live_smoke() {
+    // Both credentials are validated before creating a client or sending requests.
+    let username = required_credential("OTTERAI_USERNAME");
+    let password = required_credential("OTTERAI_PASSWORD");
+    let mut client = Client::new().expect("create live smoke client");
+    let login = checked("login", client.login(&username, &password));
+    assert!(
+        login["email"]
+            .as_str()
+            .is_some_and(|email| email.eq_ignore_ascii_case(&username)),
+        "Login response did not identify the expected account"
+    );
+    drop(password);
+    drop(username);
 
-#[test]
-fn live_get_speeches() {
-    let Some(client) = live_client() else { return };
-    let result = client.get_speeches("0", 5, "owned").unwrap();
-    assert_eq!(result.status, 200);
-    assert!(result.data["speeches"].is_array());
-}
+    // All checks run sequentially through this single authenticated client.
+    checked("user", client.get_user());
+    let speeches = checked("speeches", client.get_speeches("0", 5, "owned"));
+    assert!(speeches["speeches"].is_array(), "speeches array missing");
+    let folders = checked("folders", client.get_folders());
+    assert!(folders["folders"].is_array(), "folders array missing");
+    let speakers = checked("speakers", client.get_speakers());
+    assert!(speakers["speakers"].is_array(), "speakers array missing");
+    checked("groups", client.list_groups());
 
-#[test]
-fn live_get_folders_speakers_groups() {
-    let Some(client) = live_client() else { return };
-
-    let folders = client.get_folders().unwrap();
-    assert_eq!(folders.status, 200);
-    assert!(folders.data["folders"].is_array());
-
-    let speakers = client.get_speakers().unwrap();
-    assert_eq!(speakers.status, 200);
-    assert!(speakers.data["speakers"].is_array());
-
-    let groups = client.list_groups().unwrap();
-    assert_eq!(groups.status, 200);
-}
-
-#[test]
-fn live_get_user() {
-    let Some(client) = live_client() else { return };
-    let result = client.get_user().unwrap();
-    assert_eq!(result.status, 200);
+    eprintln!("Live smoke passed: login, user, speeches, folders, speakers, groups; one authenticated session.");
 }
