@@ -27,6 +27,8 @@ otter speeches list --days 2
 
 Most read commands take `--json` for scripts and agents; `speakers tag --json` also returns a batch result. `speeches list` and `speeches search` accept `--speaker` to filter by speaker name or id. `otter --help` and `otter help` show every command and rate-limit guidance. Use `otter <group> --help` or `otter help <group> <command>` for arguments and examples.
 
+Speaker-filtered searches, transcript display, and tagging previews resolve segment speaker IDs through the conversation's speaker list, including numeric and string IDs. Names match case-insensitive substrings; IDs match exactly. If no name is available in that list, an embedded segment name is used when present. This lookup uses the fetched conversation and adds no API requests. `speeches get --json` preserves the raw API response.
+
 CLI speech IDs are Otter **otid** values (from `otter speeches list`), not the internal `speech_id`.
 
 Use this only with an Otter account you are allowed to access, and follow [Otter.ai's Terms of Service](https://otter.ai/terms-of-service).

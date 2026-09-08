@@ -5,7 +5,7 @@ use serde::Serialize;
 use serde_json::{json, Value};
 
 use crate::auth::authenticated_client;
-use crate::util::{api, fail, print_json, result_repr, value_str};
+use crate::util::{api, fail, print_json, result_repr, transcript_segments, value_str};
 
 pub fn list(as_json: bool) {
     let client = authenticated_client();
@@ -89,10 +89,7 @@ pub fn tag(
         ));
     }
 
-    let transcripts = speech_result.data["speech"]["transcripts"]
-        .as_array()
-        .cloned()
-        .unwrap_or_default();
+    let transcripts = transcript_segments(&speech_result.data);
 
     if transcript_uuid.is_empty() && !tag_all {
         // List available transcript segments.

@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use chrono::TimeZone;
 use otter::{ApiResponse, Client, Error};
 use serde_json::Value;
@@ -27,6 +29,42 @@ pub fn value_str(value: &Value) -> String {
         Value::Null => String::new(),
         other => other.to_string(),
     }
+}
+
+/// Resolve names from the conversation's speaker list for CLI filtering and
+/// display. Keep the original response intact for `speeches get --json`.
+pub fn transcript_segments(payload: &Value) -> Vec<Value> {
+    let speech = &payload["speech"];
+    let mut names = HashMap::new();
+    if let Some(speakers) = speech["speakers"].as_array() {
+        for speaker in speakers {
+            let id = value_str(&speaker["speaker_id"]);
+            let id = if id.is_empty() {
+                value_str(&speaker["id"])
+            } else {
+                id
+            };
+            if let Some(name) = speaker["speaker_name"].as_str() {
+                if !id.is_empty() && !name.trim().is_empty() {
+                    names.insert(id, name);
+                }
+            }
+        }
+    }
+
+    let mut segments = speech["transcripts"]
+        .as_array()
+        .filter(|segments| !segments.is_empty())
+        .or_else(|| payload["transcripts"].as_array())
+        .cloned()
+        .unwrap_or_default();
+    for segment in &mut segments {
+        // A segment's `id` identifies the segment, not its speaker.
+        if let Some(name) = names.get(&value_str(&segment["speaker_id"])) {
+            segment["speaker_name"] = Value::String((*name).to_owned());
+        }
+    }
+    segments
 }
 
 /// Python truthiness for JSON values.
@@ -146,6 +184,59 @@ pub fn resolve_folder_id(client: &Client, folder_ref: &str) -> Result<String, St
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn transcripts_resolve_metadata_ids_without_changing_the_raw_response() {
+        let payload = json!({"speech": {
+            "speakers": [
+                {"id": 42, "speaker_name": "Alice Example"},
+                {"speaker_id": "43", "speaker_name": "Bob Example"},
+                {"speaker_name": "Missing ID"},
+                {"id": 44, "speaker_name": " "}
+            ],
+            "transcripts": [
+                {"uuid": "a", "speaker_id": "42", "transcript": "hello", "start_offset": 10},
+                {"uuid": "b", "speaker_id": 43, "speaker_name": "Old name"},
+                {"uuid": "c", "speaker_id": 44, "speaker_name": "Inline name"},
+                {"uuid": "d", "speaker_id": 99},
+                {"uuid": "e", "id": 42},
+                {"uuid": "f", "speaker_id": null}
+            ]
+        }});
+        let original = payload.clone();
+        let segments = transcript_segments(&payload);
+        let mut expected = payload["speech"]["transcripts"].as_array().unwrap().clone();
+        expected[0]["speaker_name"] = json!("Alice Example");
+        expected[1]["speaker_name"] = json!("Bob Example");
+        assert_eq!(segments, expected);
+        assert_eq!(payload, original);
+    }
+
+    #[test]
+    fn transcripts_support_top_level_and_inline_name_payloads() {
+        for nested in [Value::Null, json!([])] {
+            let payload = json!({
+                "speech": {
+                    "speakers": [{"id": "42", "speaker_name": "Alice"}],
+                    "transcripts": nested
+                },
+                "transcripts": [{"speaker_id": 42}, {"speaker_name": "Legacy name"}]
+            });
+            assert_eq!(
+                transcript_segments(&payload),
+                vec![
+                    json!({"speaker_id": 42, "speaker_name": "Alice"}),
+                    json!({"speaker_name": "Legacy name"})
+                ]
+            );
+        }
+        assert!(transcript_segments(&json!({})).is_empty());
+        let legacy = json!({"transcripts": [{"speaker_name": "Legacy name"}]});
+        assert_eq!(
+            transcript_segments(&legacy),
+            legacy["transcripts"].as_array().unwrap().clone()
+        );
+    }
 
     #[test]
     fn timestamp_formats_eastern() {
