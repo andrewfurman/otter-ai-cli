@@ -16,6 +16,8 @@ pub fn list(
     page_size: u32,
     source: String,
     days: Option<i64>,
+    all: bool,
+    max_pages: u32,
     speaker: Option<String>,
     as_json: bool,
 ) {
@@ -30,29 +32,21 @@ pub fn list(
         }
     };
 
-    let result = api(client.get_speeches(&folder_id, page_size, &source));
-    if !result.ok() {
-        fail(format!("Failed to get speeches: {}", result_repr(&result)));
-    }
-
-    let mut data = result.data;
-    let incomplete = data["end_of_list"].as_bool() != Some(true);
-    if let Some(warning) = listing_warning(&data, page_size) {
-        eprintln!("{warning}");
-    }
-    if let Some(days) = days {
+    let cutoff = days.map(|days| {
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("clock after epoch")
             .as_secs_f64();
-        let cutoff = now - (days as f64) * 86400.0;
-        if let Some(speeches) = data["speeches"].as_array() {
-            let filtered: Vec<Value> = speeches
-                .iter()
-                .filter(|s| s["created_at"].as_f64().unwrap_or(0.0) >= cutoff)
-                .cloned()
-                .collect();
-            data["speeches"] = Value::Array(filtered);
+        now - (days as f64) * 86400.0
+    });
+    let listing =
+        crate::pagination::collect_pages(all || days.is_some(), cutoff, max_pages, |cursor| {
+            client.get_speeches_page(&folder_id, page_size, &source, cursor)
+        });
+    let mut data = listing.data;
+    if !listing.complete && listing.error.is_none() {
+        if let Some(warning) = listing_warning(&data, page_size) {
+            eprintln!("{warning}");
         }
     }
 
@@ -64,15 +58,21 @@ pub fn list(
 
     if as_json {
         print_json(&data);
-        return;
+    } else {
+        print_listing(&data, !listing.complete);
     }
+    if let Some(error) = listing.error {
+        fail(error);
+    }
+}
 
+fn print_listing(data: &Value, incomplete: bool) {
     let speeches = data["speeches"].as_array().cloned().unwrap_or_default();
     if speeches.is_empty() {
         println!(
             "{}",
             if incomplete {
-                "No speeches found in the fetched page."
+                "No speeches found in the fetched results; the listing is incomplete."
             } else {
                 "No speeches found."
             }
@@ -388,7 +388,7 @@ fn listing_warning(data: &Value, page_size: u32) -> Option<String> {
         None => "Otter did not report whether more conversations remain.",
     };
     let fetched = data["speeches"].as_array().map_or(0, Vec::len);
-    Some(format!("Fetched {fetched} conversations (requested up to {page_size}). {completeness} Date and speaker filters apply only to this page. Increase --page-size to request a larger window; the server may cap it."))
+    Some(format!("Fetched {fetched} conversations (requested up to {page_size}). {completeness} Speaker filters apply only to this page. Use --all to fetch every page or --days N to fetch a complete date window."))
 }
 
 fn first_truthy(item: &Value, keys: &[&str]) -> String {

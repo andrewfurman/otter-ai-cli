@@ -1,6 +1,7 @@
 mod auth;
 mod folders;
 mod groups;
+mod pagination;
 mod speakers;
 mod speeches;
 mod util;
@@ -73,20 +74,26 @@ enum Command {
 
 #[derive(Subcommand)]
 enum SpeechesCommand {
-    /// List one page of speeches; date/speaker filters apply to that page
+    /// List speeches; --days paginates its date window, --all fetches every page
     List {
         /// Folder ID or name (default: 0 = all)
         #[arg(short, long, default_value = "0")]
         folder: String,
-        /// Max conversations to fetch before filtering (the server may cap this)
-        #[arg(short = 'n', long, default_value_t = 45)]
+        /// Requested conversations per page before filtering (the server may cap this)
+        #[arg(short = 'n', long, default_value_t = 45, value_parser = clap::value_parser!(u32).range(1..))]
         page_size: u32,
         /// Source filter (default: owned)
         #[arg(short, long, default_value = "owned", value_parser = ["owned", "shared", "all"])]
         source: String,
-        /// Only show speeches from the last N days within the fetched page
-        #[arg(short, long)]
+        /// Fetch the complete last N days by creation time, then apply speaker filtering
+        #[arg(short, long, value_parser = clap::value_parser!(i64).range(1..))]
         days: Option<i64>,
+        /// Fetch every page (or the complete --days window) with one login
+        #[arg(long)]
+        all: bool,
+        /// Stop with partial results and an error after this many pages
+        #[arg(long, default_value_t = 1000, value_parser = clap::value_parser!(u32).range(1..))]
+        max_pages: u32,
         /// Filter by speaker name (case-insensitive substring) or speaker id
         #[arg(long)]
         speaker: Option<String>,
@@ -259,9 +266,13 @@ fn main() {
                 page_size,
                 source,
                 days,
+                all,
+                max_pages,
                 speaker,
                 json,
-            } => speeches::list(folder, page_size, source, days, speaker, json),
+            } => speeches::list(
+                folder, page_size, source, days, all, max_pages, speaker, json,
+            ),
             SpeechesCommand::Get { speech_id, json } => speeches::get(speech_id, json),
             SpeechesCommand::Search {
                 query,

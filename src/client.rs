@@ -179,17 +179,41 @@ impl Client {
         page_size: u32,
         source: &str,
     ) -> Result<ApiResponse, Error> {
+        self.get_speeches_page(folder, page_size, source, None)
+    }
+
+    pub fn get_speeches_page(
+        &self,
+        folder: &str,
+        page_size: u32,
+        source: &str,
+        last_load_ts: Option<u64>,
+    ) -> Result<ApiResponse, Error> {
         let response = self
-            .http
-            .get(format!("{API_BASE_URL}speeches"))
-            .query(&[
-                ("userid", self.userid()?),
-                ("folder", folder),
-                ("page_size", &page_size.to_string()),
-                ("source", source),
-            ])
+            .speeches_request(folder, page_size, source, last_load_ts)?
             .send()?;
         handle_response(response)
+    }
+
+    fn speeches_request(
+        &self,
+        folder: &str,
+        page_size: u32,
+        source: &str,
+        last_load_ts: Option<u64>,
+    ) -> Result<reqwest::blocking::RequestBuilder, Error> {
+        let mut request = self.http.get(format!("{API_BASE_URL}speeches")).query(&[
+            ("userid", self.userid()?),
+            ("folder", folder),
+            ("page_size", &page_size.to_string()),
+            ("source", source),
+        ]);
+        if let Some(cursor) = last_load_ts {
+            // The unofficial endpoint requires a positive modified_after with
+            // the cursor. It can repeat recently modified recordings on pages.
+            request = request.query(&[("last_load_ts", cursor), ("modified_after", 1)]);
+        }
+        Ok(request)
     }
 
     pub fn get_speech(&self, speech_id: &str) -> Result<ApiResponse, Error> {
@@ -599,6 +623,21 @@ mod tests {
                 client.move_request("456", &ids),
                 Err(Error::InvalidInput(_))
             ));
+        }
+    }
+
+    #[test]
+    fn listing_requests_keep_filters_and_add_both_cursor_parameters() {
+        let mut client = super::Client::new().unwrap();
+        client.userid = Some("123".into());
+        for (cursor, expected) in [
+            (None, "userid=123&folder=456&page_size=100&source=shared"),
+            (Some(987), "userid=123&folder=456&page_size=100&source=shared&last_load_ts=987&modified_after=1"),
+        ] {
+            let request = client.speeches_request("456", 100, "shared", cursor).unwrap().build().unwrap();
+            assert_eq!(request.method(), reqwest::Method::GET);
+            assert_eq!(request.url().path(), "/forward/api/v1/speeches");
+            assert_eq!(request.url().query(), Some(expected));
         }
     }
 
