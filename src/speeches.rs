@@ -6,7 +6,7 @@ use serde_json::{json, Value};
 use crate::auth::{authenticated_client, prompt};
 use crate::util::{
     api, die, fail, format_duration, format_timestamp, print_json, resolve_folder_id, result_repr,
-    truthy, value_str,
+    transcript_segments, truthy, value_str,
 };
 
 #[allow(clippy::too_many_arguments)]
@@ -157,23 +157,16 @@ pub fn get(speech_id: String, as_json: bool) {
         println!("Speakers: {}", speakers.join(", "));
     }
 
-    // Support both nested and top-level transcript formats.
-    let transcripts = if truthy(&speech["transcripts"]) {
-        &speech["transcripts"]
-    } else {
-        &data["transcripts"]
-    };
-    if let Some(segments) = transcripts.as_array() {
-        if !segments.is_empty() {
-            println!("\nTranscript:");
-            println!("{}", "-".repeat(40));
-            for segment in segments {
-                let speaker = match value_str(&segment["speaker_name"]) {
-                    s if s.is_empty() => "Unknown".to_string(),
-                    s => s,
-                };
-                println!("[{speaker}]: {}", value_str(&segment["transcript"]));
-            }
+    let segments = transcript_segments(data);
+    if !segments.is_empty() {
+        println!("\nTranscript:");
+        println!("{}", "-".repeat(40));
+        for segment in segments {
+            let speaker = match value_str(&segment["speaker_name"]) {
+                s if s.is_empty() => "Unknown".to_string(),
+                s => s,
+            };
+            println!("[{speaker}]: {}", value_str(&segment["transcript"]));
         }
     }
 }
@@ -187,14 +180,7 @@ pub fn search(query: String, speech_id: String, size: u32, speaker: Option<Strin
         if !result.ok() {
             fail(format!("Search failed: {}", result_repr(&result)));
         }
-        let payload = result.data;
-        let speech = &payload["speech"];
-        let transcripts = if truthy(&speech["transcripts"]) {
-            &speech["transcripts"]
-        } else {
-            &payload["transcripts"]
-        };
-        let segments = transcripts.as_array().cloned().unwrap_or_default();
+        let segments = transcript_segments(&result.data);
         let mut results = filter_segments_by_speaker_and_query(&segments, &needle, &query);
         if results.len() > size as usize {
             results.truncate(size as usize);
@@ -447,21 +433,34 @@ mod tests {
 
     #[test]
     fn filter_segments_requires_speaker_and_query() {
-        let segments = vec![
-            json!({"speaker_name": "Alice", "speaker_id": 1, "transcript": "hello world"}),
-            json!({"speaker_name": "Alice", "text": "goodbye"}),
-            json!({"speaker_name": "Bob", "transcript": "hello world"}),
-        ];
+        let payload = json!({"speech": {
+            "speakers": [
+                {"id": 1, "speaker_name": "Alice"},
+                {"id": "2", "speaker_name": "Bob"}
+            ],
+            "transcripts": [
+                {"speaker_id": "1", "transcript": "hello world"},
+                {"speaker_id": 1, "text": "goodbye"},
+                {"speaker_id": 2, "transcript": "hello world"},
+                {"speaker_id": null, "transcript": "hello world"},
+                {"speaker_name": "Legacy name", "transcript": "hello world"}
+            ]
+        }});
+        let segments = transcript_segments(&payload);
 
-        let hits = filter_segments_by_speaker_and_query(&segments, "Alice", "HELLO");
+        let hits = filter_segments_by_speaker_and_query(&segments, "  ali  ", "HELLO");
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0]["transcript"], "hello world");
 
         let by_id = filter_segments_by_speaker_and_query(&segments, "1", "world");
-        assert_eq!(by_id.len(), 1);
+        assert_eq!(by_id, hits);
         assert_eq!(by_id[0]["speaker_name"], "Alice");
 
         let none = filter_segments_by_speaker_and_query(&segments, "Bob", "goodbye");
         assert!(none.is_empty());
+        assert_eq!(
+            filter_segments_by_speaker_and_query(&segments, "Legacy", "hello").len(),
+            1
+        );
     }
 }
