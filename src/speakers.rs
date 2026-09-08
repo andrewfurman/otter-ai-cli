@@ -217,7 +217,7 @@ fn tag_segments(
     };
     for (index, uuid) in segments.iter().enumerate() {
         match tag(uuid) {
-            Ok(result) if result.ok() && result.data["status"] != "failed" => {
+            Ok(result) if result.ok() => {
                 report.tagged_uuids.push(uuid.clone());
                 continue;
             }
