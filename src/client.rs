@@ -158,6 +158,8 @@ pub struct Client {
     http: reqwest::blocking::Client,
     jar: Arc<Jar>,
     userid: Option<String>,
+    /// Debug: JWT-shaped scan of the most recent login response headers.
+    login_header_jwt_scan: Option<Vec<(String, bool)>>,
 }
 
 impl Client {
@@ -172,6 +174,7 @@ impl Client {
             http,
             jar,
             userid: None,
+            login_header_jwt_scan: None,
         })
     }
 
@@ -203,6 +206,17 @@ impl Client {
             .basic_auth(username, Some(password))
             .send()?;
 
+        // Debug: scan headers for JWT-shaped values (never stored or printed).
+        let mut header_scan = Vec::new();
+        for (name, value) in response.headers().iter() {
+            let found = value
+                .to_str()
+                .ok()
+                .map_or(false, |v| looks_like_jwt_str(v));
+            header_scan.push((name.as_str().to_string(), found));
+        }
+        self.login_header_jwt_scan = Some(header_scan);
+
         self.accept_login(handle_response(response)?)
     }
 
@@ -216,6 +230,30 @@ impl Client {
             self.userid = numeric_id(&result.data["userid"]);
         }
         Ok(result)
+    }
+
+    /// Debug: names of cookies for https://otter.ai and whether their values look like JWTs.
+    pub fn debug_cookie_names_and_jwt_hits(&self) -> Vec<(String, bool)> {
+        let url = "https://otter.ai/".parse().expect("static url parses");
+        let Some(header) = self.jar.cookies(&url) else {
+            return Vec::new();
+        };
+        let text = header.to_str().unwrap_or_default();
+        text.split("; ")
+            .filter(|pair| !pair.is_empty())
+            .map(|pair| {
+                let mut parts = pair.splitn(2, '=');
+                let name = parts.next().unwrap_or_default().to_string();
+                let value = parts.next().unwrap_or_default();
+                let found = looks_like_jwt_str(value);
+                (name, found)
+            })
+            .collect()
+    }
+
+    /// Debug: header names from the most recent login response, plus whether a JWT-like value was present.
+    pub fn debug_login_header_jwt_scan(&self) -> Option<Vec<(String, bool)>> {
+        self.login_header_jwt_scan.clone()
     }
 
     pub fn get_user(&self) -> Result<ApiResponse, Error> {
@@ -677,6 +715,21 @@ fn save_export(
         status,
         data: Value::Object(data),
         retry_after_seconds: None,
+    })
+}
+
+fn looks_like_jwt_str(s: &str) -> bool {
+    let mut parts = s.split('.').take(3).collect::<Vec<_>>();
+    if parts.len() != 3 {
+        return false;
+    }
+    if !parts[0].starts_with("eyJ") {
+        return false;
+    }
+    parts.iter().all(|p| {
+        !p.is_empty()
+            && p.chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
     })
 }
 

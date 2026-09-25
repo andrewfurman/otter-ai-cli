@@ -16,6 +16,10 @@ pub fn ask(question: String, as_json: bool, timeout_secs: u64, debug: bool) {
     let token_env = std::env::var("OTTERAI_WS_TOKEN")
         .ok()
         .filter(|s| !s.trim().is_empty());
+    let env_hit = token_env
+        .as_ref()
+        .map(|s| looks_like_jwt(s))
+        .unwrap_or(false);
     let token = if let Some(_) = token_env {
         token_source = "env:OTTERAI_WS_TOKEN".into();
         token_env.unwrap()
@@ -25,42 +29,77 @@ pub fn ask(question: String, as_json: bool, timeout_secs: u64, debug: bool) {
     } else {
         // Fallback: GET /user and scan its JSON
         let user = crate::util::api(client.get_user());
+        if let Some((path, tok)) = find_jwt_in_value(&user.data, "") {
+            token_source = format!("user:{path}");
+            tok
+        } else {
+            fail("Could not locate a websocket token for AI Chat. Run with --debug for hints.");
+        }
+    };
+    if debug {
+        // Collect key names for login and user
+        let login_keys = login
+            .data
+            .as_object()
+            .map(|m| m.keys().cloned().collect::<Vec<_>>())
+            .unwrap_or_default();
+        debug_notes.push(format!("login keys: {}", login_keys.join(", ")));
+        let user = crate::util::api(client.get_user());
         let user_keys = user
             .data
             .as_object()
             .map(|m| m.keys().cloned().collect::<Vec<_>>())
             .unwrap_or_default();
-        if debug {
-            debug_notes.push(format!("user keys: {}", user_keys.join(", ")));
-        }
-        if let Some((path, tok)) = find_jwt_in_value(&user.data, "") {
-            token_source = format!("user:{path}");
-            tok
-        } else {
-            if debug {
-                let login_keys = login
-                    .data
-                    .as_object()
-                    .map(|m| m.keys().cloned().collect::<Vec<_>>())
-                    .unwrap_or_default();
-                debug_notes.push(format!("login keys: {}", login_keys.join(", ")));
-                eprintln!(
-                    "Debug: websocket token not found. Checked env, login JSON, and user JSON.\n{}",
-                    debug_notes.join("\n")
-                );
-            }
-            fail("Could not locate a websocket token for AI Chat. Run with --debug for hints.");
-        }
-    };
-    if debug {
+        debug_notes.push(format!("user keys: {}", user_keys.join(", ")));
+
+        // Scan hits by location (without printing values)
         eprintln!("Debug: using websocket token from {token_source}");
+        eprintln!("Debug: env: {}", if env_hit { "hit" } else { "no" });
+        if let Some((path, _)) = find_jwt_in_value(&login.data, "") {
+            eprintln!("Debug: login.json: hit at {path}");
+        } else {
+            eprintln!("Debug: login.json: no");
+        }
+        if let Some((path, _)) = find_jwt_in_value(&user.data, "") {
+            eprintln!("Debug: user.json: hit at {path}");
+        } else {
+            eprintln!("Debug: user.json: no");
+        }
+        let header_hits = client
+            .debug_login_header_jwt_scan()
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|(name, hit)| if hit { Some(name) } else { None })
+            .collect::<Vec<_>>();
+        eprintln!(
+            "Debug: login.headers: {}",
+            if header_hits.is_empty() {
+                "no".into()
+            } else {
+                format!("hit at [{}]", header_hits.join(", "))
+            }
+        );
+        let cookies = client.debug_cookie_names_and_jwt_hits();
+        let cookie_report = if cookies.is_empty() {
+            "none".to_string()
+        } else {
+            cookies
+                .into_iter()
+                .map(|(name, hit)| format!("{name}:{}", if hit { "hit" } else { "no" }))
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        eprintln!("Debug: cookies: {cookie_report}");
+        for note in debug_notes {
+            eprintln!("Debug: {note}");
+        }
     }
 
     // Open websocket BEFORE sending the chat message to avoid missing frames.
     let thread_uuid = Uuid::new_v4().to_string();
     let ws_url = format!(
         "wss://ws.aisense.com/api/v2/client/session_update?token={}",
-        token
+        urlencoding::encode(&token)
     );
     let request = {
         use tungstenite::client::IntoClientRequest;
@@ -99,6 +138,7 @@ pub fn ask(question: String, as_json: bool, timeout_secs: u64, debug: bool) {
 
     // Read updates until finished for this message_uuid, with timeout.
     let (tx, rx) = mpsc::channel::<Value>();
+    let target_uuid = message_uuid.clone();
     std::thread::spawn(move || {
         let mut latest: Option<Value> = None;
         loop {
@@ -114,7 +154,7 @@ pub fn ask(question: String, as_json: bool, timeout_secs: u64, debug: bool) {
                             && v["action"] == "update"
                         {
                             let message = &v["message"];
-                            if value_str(&message["chat_message_uuid"]) == message_uuid {
+                            if value_str(&message["chat_message_uuid"]) == target_uuid {
                                 latest = Some(message.clone());
                                 if message["finished"].as_bool() == Some(true) {
                                     let _ = tx.send(message.clone());
