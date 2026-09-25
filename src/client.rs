@@ -209,10 +209,7 @@ impl Client {
         // Debug: scan headers for JWT-shaped values (never stored or printed).
         let mut header_scan = Vec::new();
         for (name, value) in response.headers().iter() {
-            let found = value
-                .to_str()
-                .ok()
-                .map_or(false, |v| looks_like_jwt_str(v));
+            let found = value.to_str().ok().map_or(false, |v| looks_like_jwt_str(v));
             header_scan.push((name.as_str().to_string(), found));
         }
         self.login_header_jwt_scan = Some(header_scan);
