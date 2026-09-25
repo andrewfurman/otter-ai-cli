@@ -1,6 +1,8 @@
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use base64::Engine as _;
 use serde_json::{json, Value};
 use uuid::Uuid;
 
@@ -10,8 +12,22 @@ use crate::util::{fail, print_json, value_str};
 pub fn ask(question: String, as_json: bool, timeout_secs: u64, debug: bool) {
     let (client, login) = authenticated_client_with_login();
 
-    // Token discovery: env var first, then scan login, then scan user.
-    let mut debug_notes: Vec<String> = Vec::new();
+    // Debug pre-scan: headers, cookies, login/user/speeches JSON JWTs.
+    let _debug_notes: Vec<String> = Vec::new();
+    let header_hits = client
+        .debug_login_header_jwt_scan()
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|(name, hit)| if hit { Some(name) } else { None })
+        .collect::<Vec<_>>();
+    let cookie_hits = client.debug_cookie_names_and_jwt_hits();
+    let user = crate::util::api(client.get_user());
+    let speeches_once = crate::util::api(client.get_speeches("0", 1, "owned"));
+    let login_jwts = collect_jwts(&login.data, "");
+    let user_jwts = collect_jwts(&user.data, "");
+    let speeches_jwts = collect_jwts(&speeches_once.data, "");
+
+    // Token discovery: env var first, then scan login/user preferred keys, then speeches[0].
     let token_source: String;
     let token_env = std::env::var("OTTERAI_WS_TOKEN")
         .ok()
@@ -23,98 +39,101 @@ pub fn ask(question: String, as_json: bool, timeout_secs: u64, debug: bool) {
     let token = if let Some(env_tok) = token_env {
         token_source = "env:OTTERAI_WS_TOKEN".into();
         env_tok
-    } else if let Some((path, tok)) = find_jwt_in_value(&login.data, "") {
-        token_source = format!("login:{path}");
-        tok
     } else {
-        // Fallback: GET /user and scan its JSON
-        let user = crate::util::api(client.get_user());
-        if let Some((path, tok)) = find_jwt_in_value(&user.data, "") {
-            token_source = format!("user:{path}");
-            tok
-        } else {
-            fail("Could not locate a websocket token for AI Chat. Run with --debug for hints.");
+        // Preferred keys in login/user
+        let preferred_login = preferred_jwts(&login_jwts);
+        let preferred_user = preferred_jwts(&user_jwts);
+        // From most recent speech only (paths containing "speeches[0].")
+        let preferred_speeches = preferred_speeches_jwt(&speeches_jwts);
+
+        // Build candidate list labeled with their paths
+        let mut candidates: Vec<(String, String)> = Vec::new();
+        for item in preferred_login {
+            candidates.push((format!("login.json:{}", item.path), item.token));
         }
+        for item in preferred_user {
+            candidates.push((format!("user.json:{}", item.path), item.token));
+        }
+        for item in preferred_speeches {
+            candidates.push((format!("speeches.json:{}", item.path), item.token));
+        }
+
+        // Always print the debug report before attempting/possibly failing.
+        if debug {
+            eprintln!("Debug: env: {}", if env_hit { "hit" } else { "no" });
+            eprintln!(
+                "Debug: login.headers: {}",
+                if header_hits.is_empty() {
+                    "no".into()
+                } else {
+                    format!("hit at [{}]", header_hits.join(", "))
+                }
+            );
+            let cookie_report = if cookie_hits.is_empty() {
+                "none".to_string()
+            } else {
+                cookie_hits
+                    .iter()
+                    .map(|(name, hit)| format!("{name}:{}", if *hit { "hit" } else { "no" }))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            };
+            eprintln!("Debug: cookies: {cookie_report}");
+            print_jwt_report("login.json", &login_jwts);
+            print_jwt_report("user.json", &user_jwts);
+            print_jwt_report("speeches.json", &speeches_jwts);
+        }
+
+        // Try candidates in order until websocket handshake succeeds.
+        let mut chosen: Option<(String, String)> = None;
+        let mut preopened_socket: Option<
+            tungstenite::WebSocket<tungstenite::stream::MaybeTlsStream<std::net::TcpStream>>,
+        > = None;
+        for (label, tok) in &candidates {
+            match connect_ws(tok) {
+                Ok((sock, _status)) => {
+                    chosen = Some((label.clone(), tok.clone()));
+                    preopened_socket = Some(sock);
+                    break;
+                }
+                Err(err) => {
+                    if debug {
+                        eprintln!(
+                            "Debug: websocket handshake failed for {label}: {}",
+                            err.code.unwrap_or(0)
+                        );
+                    }
+                }
+            }
+        }
+        let Some((label, tok)) = chosen else {
+            if debug && candidates.is_empty() {
+                eprintln!("Debug: no preferred JWT candidates found in login/user/speeches JSON");
+            }
+            fail("Could not locate a websocket token for AI Chat. Run with --debug for hints.");
+        };
+        token_source = label;
+        // Save the pre-opened socket in outer scope via a global mutable captured below.
+        PREOPENED_SOCKET.with(|slot| slot.replace(preopened_socket));
+        tok
     };
     if debug {
-        // Collect key names for login and user
-        let login_keys = login
-            .data
-            .as_object()
-            .map(|m| m.keys().cloned().collect::<Vec<_>>())
-            .unwrap_or_default();
-        debug_notes.push(format!("login keys: {}", login_keys.join(", ")));
-        let user = crate::util::api(client.get_user());
-        let user_keys = user
-            .data
-            .as_object()
-            .map(|m| m.keys().cloned().collect::<Vec<_>>())
-            .unwrap_or_default();
-        debug_notes.push(format!("user keys: {}", user_keys.join(", ")));
-
-        // Scan hits by location (without printing values)
         eprintln!("Debug: using websocket token from {}", token_source);
-        eprintln!("Debug: env: {}", if env_hit { "hit" } else { "no" });
-        if let Some((path, _)) = find_jwt_in_value(&login.data, "") {
-            eprintln!("Debug: login.json: hit at {path}");
-        } else {
-            eprintln!("Debug: login.json: no");
-        }
-        if let Some((path, _)) = find_jwt_in_value(&user.data, "") {
-            eprintln!("Debug: user.json: hit at {path}");
-        } else {
-            eprintln!("Debug: user.json: no");
-        }
-        let header_hits = client
-            .debug_login_header_jwt_scan()
-            .unwrap_or_default()
-            .into_iter()
-            .filter_map(|(name, hit)| if hit { Some(name) } else { None })
-            .collect::<Vec<_>>();
-        eprintln!(
-            "Debug: login.headers: {}",
-            if header_hits.is_empty() {
-                "no".into()
-            } else {
-                format!("hit at [{}]", header_hits.join(", "))
-            }
-        );
-        let cookies = client.debug_cookie_names_and_jwt_hits();
-        let cookie_report = if cookies.is_empty() {
-            "none".to_string()
-        } else {
-            cookies
-                .into_iter()
-                .map(|(name, hit)| format!("{name}:{}", if hit { "hit" } else { "no" }))
-                .collect::<Vec<_>>()
-                .join(", ")
-        };
-        eprintln!("Debug: cookies: {cookie_report}");
-        for note in debug_notes {
-            eprintln!("Debug: {note}");
-        }
     }
 
     // Open websocket BEFORE sending the chat message to avoid missing frames.
     let thread_uuid = Uuid::new_v4().to_string();
-    let ws_url = format!(
-        "wss://ws.aisense.com/api/v2/client/session_update?token={}",
-        urlencoding::encode(&token)
-    );
-    let request = {
-        use tungstenite::client::IntoClientRequest;
-        let mut req = ws_url
-            .as_str()
-            .into_client_request()
-            .expect("ws url parses into request");
-        // Match the browser's Origin to avoid cross-origin rejections.
-        req.headers_mut()
-            .insert("Origin", "https://otter.ai".parse().unwrap());
-        req
-    };
-    let (mut socket, _response) = match tungstenite::client::connect(request) {
-        Ok(ok) => ok,
-        Err(err) => fail(format!("Failed to open websocket: {err}")),
+    // Use the pre-opened socket if present; otherwise connect with the chosen token.
+    thread_local! {
+        static PREOPENED_SOCKET: std::cell::RefCell<Option<tungstenite::WebSocket<tungstenite::stream::MaybeTlsStream<std::net::TcpStream>>>> = const { std::cell::RefCell::new(None) };
+    }
+    let mut socket = if let Some(sock) = PREOPENED_SOCKET.with(|slot| slot.replace(None)) {
+        sock
+    } else {
+        match connect_ws(&token) {
+            Ok((sock, _)) => sock,
+            Err(_err) => fail("Failed to open websocket with the selected token"),
+        }
     };
 
     // Send the question.
@@ -211,33 +230,73 @@ pub fn ask(question: String, as_json: bool, timeout_secs: u64, debug: bool) {
     }
 }
 
-fn find_jwt_in_value(root: &Value, path: &str) -> Option<(String, String)> {
-    match root {
-        Value::String(s) if looks_like_jwt(s) => Some((path.into(), s.clone())),
-        Value::Object(map) => {
-            for (k, v) in map {
-                let child = if path.is_empty() {
-                    k.clone()
-                } else {
-                    format!("{path}.{k}")
-                };
-                if let Some(found) = find_jwt_in_value(v, &child) {
-                    return Some(found);
+#[derive(Clone)]
+struct FoundJwt {
+    path: String,
+    token: String,
+}
+
+fn collect_jwts(root: &Value, path: &str) -> Vec<FoundJwt> {
+    let mut out = Vec::new();
+    fn walk(node: &Value, path: &str, out: &mut Vec<FoundJwt>) {
+        match node {
+            Value::String(s) if looks_like_jwt(s) => out.push(FoundJwt {
+                path: path.into(),
+                token: s.clone(),
+            }),
+            Value::Object(map) => {
+                for (k, v) in map {
+                    let child = if path.is_empty() {
+                        k.clone()
+                    } else {
+                        format!("{path}.{k}")
+                    };
+                    walk(v, &child, out);
                 }
             }
-            None
-        }
-        Value::Array(items) => {
-            for (idx, v) in items.iter().enumerate() {
-                let child = format!("{path}[{idx}]");
-                if let Some(found) = find_jwt_in_value(v, &child) {
-                    return Some(found);
+            Value::Array(items) => {
+                for (idx, v) in items.iter().enumerate() {
+                    let child = format!("{path}[{idx}]");
+                    walk(v, &child, out);
                 }
             }
-            None
+            _ => {}
         }
-        _ => None,
     }
+    walk(root, path, &mut out);
+    out
+}
+
+fn preferred_jwts(items: &[FoundJwt]) -> Vec<FoundJwt> {
+    let mut out = Vec::new();
+    for item in items {
+        let key = last_key(&item.path).to_ascii_lowercase();
+        let is_pubsub = key.contains("pubsub_jwt");
+        let is_ws_token = key.contains("ws") && key.contains("token");
+        if is_pubsub || is_ws_token {
+            out.push(item.clone());
+        }
+    }
+    out
+}
+
+fn preferred_speeches_jwt(items: &[FoundJwt]) -> Vec<FoundJwt> {
+    let mut out = Vec::new();
+    for item in items {
+        if item.path.contains("speeches[0].") {
+            let key = last_key(&item.path).to_ascii_lowercase();
+            if key.contains("pubsub_jwt") || (key.contains("ws") && key.contains("token")) {
+                out.push(item.clone());
+            }
+        }
+    }
+    out
+}
+
+fn last_key(path: &str) -> String {
+    // Return the tail segment after the last '.', trimming any trailing array index.
+    let seg = path.rsplit('.').next().unwrap_or(path);
+    seg.to_string()
 }
 
 fn looks_like_jwt(s: &str) -> bool {
@@ -255,6 +314,81 @@ fn looks_like_jwt(s: &str) -> bool {
             && p.chars()
                 .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
     })
+}
+
+fn print_jwt_report(label: &str, items: &[FoundJwt]) {
+    if items.is_empty() {
+        eprintln!("Debug: {label}: no JWT-like strings");
+        return;
+    }
+    for item in items {
+        let (alg, claims) = jwt_metadata(&item.token);
+        eprintln!(
+            "Debug: {label}: path={} len={} alg={} claims=[{}]",
+            item.path,
+            item.token.len(),
+            alg.unwrap_or_else(|| "unknown".into()),
+            claims.join(", ")
+        );
+    }
+}
+
+fn jwt_metadata(token: &str) -> (Option<String>, Vec<String>) {
+    let parts: Vec<&str> = token.split('.').collect();
+    if parts.len() != 3 {
+        return (None, Vec::new());
+    }
+    let header = URL_SAFE_NO_PAD.decode(parts[0]).ok();
+    let payload = URL_SAFE_NO_PAD.decode(parts[1]).ok();
+    let alg = header
+        .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+        .and_then(|v| v.get("alg").and_then(Value::as_str).map(|s| s.to_string()));
+    let claims = payload
+        .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+        .and_then(|v| v.as_object().map(|m| m.keys().cloned().collect::<Vec<_>>()))
+        .unwrap_or_default();
+    (alg, claims)
+}
+
+struct ConnectError {
+    code: Option<u16>,
+}
+
+fn connect_ws(
+    token: &str,
+) -> Result<
+    (
+        tungstenite::WebSocket<tungstenite::stream::MaybeTlsStream<std::net::TcpStream>>,
+        u16,
+    ),
+    ConnectError,
+> {
+    let ws_url = format!(
+        "wss://ws.aisense.com/api/v2/client/session_update?token={}",
+        urlencoding::encode(token)
+    );
+    use tungstenite::client::IntoClientRequest;
+    let mut req = ws_url
+        .as_str()
+        .into_client_request()
+        .expect("ws url parses into request");
+    req.headers_mut()
+        .insert("Origin", "https://otter.ai".parse().unwrap());
+    match tungstenite::client::connect(req) {
+        Ok((sock, resp)) => Ok((sock, resp.status().as_u16())),
+        Err(err) => {
+            // Try to extract an HTTP status when available
+            let mut code = None;
+            match err {
+                tungstenite::Error::Http(resp) => {
+                    code = Some(resp.status().as_u16());
+                }
+                tungstenite::Error::ConnectionClosed => code = Some(0),
+                _ => {}
+            }
+            Err(ConnectError { code })
+        }
+    }
 }
 
 fn render_blocks(blocks: &Value) -> String {
