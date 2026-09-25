@@ -80,6 +80,9 @@ enum Command {
         /// Filter by speaker display name (repeatable)
         #[arg(long, value_delimiter = ',', value_parser = clap::builder::NonEmptyStringValueParser::new())]
         speaker: Vec<String>,
+        /// Search the full archive for speakers (bounded by --max-seconds)
+        #[arg(long)]
+        all: bool,
         /// Print request/response debug info to stderr
         #[arg(long)]
         debug: bool,
@@ -407,6 +410,7 @@ fn main() {
         Command::Search {
             query,
             speaker,
+            all,
             debug,
             tries,
             max_seconds,
@@ -425,6 +429,7 @@ fn main() {
             search::run(search::SearchOptions {
                 query,
                 speakers: speaker,
+                all,
                 from,
                 to,
                 days,

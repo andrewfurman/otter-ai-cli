@@ -18,6 +18,7 @@ pub enum SortMode {
 pub struct SearchOptions {
     pub query: Option<String>,
     pub speakers: Vec<String>,
+    pub all: bool,
     pub from: Option<String>,
     pub to: Option<String>,
     pub days: Option<u32>,
@@ -33,6 +34,7 @@ pub fn run(options: SearchOptions) {
     let SearchOptions {
         query,
         speakers,
+        all,
         from,
         to,
         days,
@@ -135,88 +137,59 @@ pub fn run(options: SearchOptions) {
         }
         hits = Some(list);
     } else if !speakers.is_empty() && query.as_deref().is_none_or(str::is_empty) {
-        // Speaker-only with no dates: windowed advanced_search union, walking back in time.
-        let mut total: std::collections::HashMap<String, Value> = std::collections::HashMap::new();
-        let start_clock = std::time::Instant::now();
-        let window_days: i64 = 90;
-        let window_secs = window_days * 86400;
-        let mut window_end = start_of_day_exclusive_et(&today_yyyy_mm_dd()).unwrap_or(0);
-        let floor_ts = window_end.saturating_sub(10 * 365 * 86400); // ~10 years back
-        let mut empty_windows = 0u32;
-        let stop_after_empty = 3u32;
-        while window_end > floor_ts {
-            if start_clock.elapsed().as_secs() >= max_seconds as u64 {
-                let covered_to = format_timestamp(&json!(window_end));
-                eprintln!(
-                    "Time budget reached ({}s). Coverage so far back to {}.",
-                    max_seconds, covered_to
-                );
-                break;
-            }
-            let window_begin = window_end.saturating_sub(window_secs);
-            let mut window_hits_opt: Option<Vec<Value>> = None;
-            for speaker in speakers.iter() {
-                let mut sh = union_advanced_search_tries(
+        // Speaker-only searches:
+        // - With any date bound: use listing path over that window, exact name match.
+        // - With no dates: default to last 90 days on the listing path; --all fetches full archive under budget.
+        let mode = decide_speaker_path(
+            false,
+            true,
+            begin.is_some(),
+            end.is_some(),
+            days.is_some(),
+            all,
+        );
+        match mode {
+            SpeakerSearchMode::DateBounded => {
+                let list_hits = list_speakers_exact_name(
                     &client,
-                    MultiTryOpts {
-                        query: None,
-                        speaker: Some(speaker.as_str()),
-                        begin_date: Some(window_begin),
-                        end_date: Some(window_end),
-                        size: DEFAULT_LIMIT,
-                        relevance,
-                        tries,
-                        debug,
-                    },
+                    begin,
+                    end,
+                    &speakers,
+                    limit,
+                    max_seconds,
+                    debug,
                 );
-                sh = apply_user_window_filter(sh, window_begin, window_end);
-                window_hits_opt = Some(match (window_hits_opt.take(), Some(sh)) {
-                    (None, Some(h)) => h,
-                    (Some(existing), Some(new)) => intersect_by_otid(existing, new),
-                    (Some(existing), None) => existing,
-                    (None, None) => Vec::new(),
-                });
-                if window_hits_opt.as_ref().is_some_and(|h| h.is_empty()) {
-                    break;
-                }
+                hits = Some(list_hits);
             }
-            let window_hits = window_hits_opt.unwrap_or_default();
-            let mut new_count = 0usize;
-            for hit in window_hits {
-                let otid = value_str(&hit["speech_otid"]);
-                if otid.is_empty() {
-                    continue;
-                }
-                match total.get_mut(&otid) {
-                    Some(existing) => {
-                        if merge_hit(existing, &hit) {
-                            // merged details
-                        }
-                    }
-                    None => {
-                        total.insert(otid, hit);
-                        new_count += 1;
-                    }
-                }
+            SpeakerSearchMode::Last90Days => {
+                eprintln!("No date range given; searching the last 90 days. Use --from/--days or --all to widen.");
+                let end_ts = start_of_day_exclusive_et(&today_yyyy_mm_dd()).unwrap_or(0);
+                let begin_ts = end_ts.saturating_sub(90 * 86400);
+                let list_hits = list_speakers_exact_name(
+                    &client,
+                    Some(begin_ts),
+                    Some(end_ts),
+                    &speakers,
+                    limit,
+                    max_seconds,
+                    debug,
+                );
+                hits = Some(list_hits);
             }
-            eprintln!(
-                "window {}..{}: +{} (total {})",
-                format_timestamp(&json!(window_begin)),
-                format_timestamp(&json!(window_end)),
-                new_count,
-                total.len()
-            );
-            if new_count == 0 {
-                empty_windows += 1;
-            } else {
-                empty_windows = 0;
+            SpeakerSearchMode::FullArchive => {
+                let list_hits = list_speakers_exact_name(
+                    &client,
+                    None,
+                    None,
+                    &speakers,
+                    limit,
+                    max_seconds,
+                    debug,
+                );
+                hits = Some(list_hits);
             }
-            if empty_windows >= stop_after_empty {
-                break;
-            }
-            window_end = window_begin;
+            SpeakerSearchMode::None => {}
         }
-        hits = Some(total.into_values().collect());
     } else {
         // Keyword + speaker(s): union several calls per speaker, then intersect conversations
         // containing ALL given speakers.
@@ -322,6 +295,34 @@ fn output_hits(mut hits: Vec<Value>, as_json: bool) {
         }
         println!("{line}\n");
     }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum SpeakerSearchMode {
+    DateBounded,
+    Last90Days,
+    FullArchive,
+    None,
+}
+
+fn decide_speaker_path(
+    has_query: bool,
+    has_speakers: bool,
+    has_begin: bool,
+    has_end: bool,
+    has_days: bool,
+    all: bool,
+) -> SpeakerSearchMode {
+    if !has_speakers || has_query {
+        return SpeakerSearchMode::None;
+    }
+    if has_begin || has_end || has_days {
+        return SpeakerSearchMode::DateBounded;
+    }
+    if all {
+        return SpeakerSearchMode::FullArchive;
+    }
+    SpeakerSearchMode::Last90Days
 }
 
 fn date_only_fallback_list(
@@ -614,6 +615,107 @@ fn mask_session(url: &str) -> String {
     }
 }
 
+fn list_speakers_exact_name(
+    client: &otter::Client,
+    begin: Option<i64>,
+    end: Option<i64>,
+    speakers: &[String],
+    limit: u32,
+    max_seconds: u32,
+    _debug: bool,
+) -> Vec<Value> {
+    use std::collections::HashSet;
+    let wanted: HashSet<String> = speakers.iter().map(|s| s.trim().to_lowercase()).collect();
+    let start = std::time::Instant::now();
+    let mut results: Vec<Value> = Vec::new();
+    let mut seen: HashSet<String> = HashSet::new();
+    let mut cursor: Option<u64> = None;
+    let mut oldest: i64 = i64::MAX;
+    loop {
+        if start.elapsed().as_secs() >= max_seconds as u64 {
+            let covered_to = if oldest == i64::MAX {
+                "unknown".to_string()
+            } else {
+                format_timestamp(&json!(oldest))
+            };
+            eprintln!(
+                "Time budget reached ({}s). Coverage so far back to {}.",
+                max_seconds, covered_to
+            );
+            break;
+        }
+        let page = match client.get_speeches_page("0", 100, "owned", cursor) {
+            Ok(p) => p,
+            Err(err) => {
+                eprintln!("Warning: listing failed: {err}. Returning partial results.");
+                break;
+            }
+        };
+        let arr = page.data["speeches"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        eprintln!("listed {} speeches…", arr.len());
+        if arr.is_empty() {
+            break;
+        }
+        for s in arr {
+            let created = s["created_at"].as_i64().unwrap_or(0);
+            if created > 0 && created < oldest {
+                oldest = created;
+            }
+            let within_begin = begin.map(|b| (created as f64) >= b as f64).unwrap_or(true);
+            let within_end = end.map(|e| (created as f64) < e as f64).unwrap_or(true);
+            if !(within_begin && within_end) {
+                continue;
+            }
+            // Exact, case-insensitive match: all requested speaker names must be present.
+            let names: HashSet<String> = s["speakers"]
+                .as_array()
+                .unwrap_or(&vec![])
+                .iter()
+                .filter_map(|sp| sp.get("speaker_name").and_then(Value::as_str))
+                .map(|n| n.trim().to_lowercase())
+                .collect();
+            if !wanted.iter().all(|w| names.contains(w)) {
+                continue;
+            }
+            let otid = value_str(&s["otid"]);
+            if otid.is_empty() || !seen.insert(otid.clone()) {
+                continue;
+            }
+            let mut hit = json!({
+                "speech_otid": otid,
+                "title": s["title"],
+                "duration": s["duration"],
+                "start_time": s["created_at"],
+                "matched_transcripts": [],
+            });
+            add_recorded_at(&mut hit);
+            results.push(hit);
+        }
+        // Stop when end_of_list or when begin cutoff crossed.
+        if page.data["end_of_list"].as_bool() == Some(true) {
+            break;
+        }
+        let next = page.data["last_load_ts"].as_u64().unwrap_or(0);
+        if next == 0 {
+            break;
+        }
+        if begin.is_some_and(|b| (next as f64) < b as f64) {
+            break;
+        }
+        cursor = Some(next);
+        if results.len() >= limit as usize {
+            break;
+        }
+    }
+    if results.len() > limit as usize {
+        results.truncate(limit as usize);
+    }
+    results
+}
+
 fn start_of_day_et(date: &str) -> Option<i64> {
     let (year, month, day) = split_ymd(date)?;
     match chrono_tz::America::New_York.with_ymd_and_hms(year, month, day, 0, 0, 0) {
@@ -843,6 +945,30 @@ fn intersect_by_otid(a: Vec<Value>, b: Vec<Value>) -> Vec<Value> {
 mod tests {
     use super::*;
     use chrono::{TimeZone, Timelike};
+
+    #[test]
+    fn speaker_routing_prefers_date_bounded_and_last_90_days() {
+        // Date-bounded when any bound present
+        assert_eq!(
+            super::decide_speaker_path(false, true, true, false, false, false),
+            super::SpeakerSearchMode::DateBounded
+        );
+        // Last90Days when no bounds and not all
+        assert_eq!(
+            super::decide_speaker_path(false, true, false, false, false, false),
+            super::SpeakerSearchMode::Last90Days
+        );
+        // FullArchive when --all
+        assert_eq!(
+            super::decide_speaker_path(false, true, false, false, false, true),
+            super::SpeakerSearchMode::FullArchive
+        );
+        // None when query present
+        assert_eq!(
+            super::decide_speaker_path(true, true, false, false, false, false),
+            super::SpeakerSearchMode::None
+        );
+    }
 
     #[test]
     fn title_time_parser_extracts_expected_epoch() {
