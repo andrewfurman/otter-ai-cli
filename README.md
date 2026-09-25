@@ -52,6 +52,7 @@ Use this only with an Otter account you are allowed to access, and follow [Otter
 | `otter speakers list` | List known speaker names and IDs |
 | `otter speakers create NAME` | Create a named speaker |
 | `otter speakers tag OTID SPEAKER_ID` | List segments, or tag selected segments with `-t` |
+| `otter speakers untag OTID` | List segments, or clear selected tags with `-t` |
 | `otter folders list` | List folders |
 | `otter folders create NAME` | Create a folder |
 | `otter folders rename FOLDER_ID NAME` | Rename a folder |
@@ -124,6 +125,14 @@ Both forms reuse one login, one speaker lookup, one transcript fetch, and one HT
 `--all` assigns the selected speaker to **every segment in the conversation**, including other people's turns. It does not mean “all turns belonging to this person.” It cannot be combined with `-t`.
 
 The batch stops on the first API or transport error and exits nonzero. Successful tags remain saved. JSON output reports `tagged_uuids`, `failed_uuid`, `unattempted_uuids`, `error`, and `retry_after_seconds`, along with the conversation and speaker IDs. A failed or interrupted network request may already have saved its change: reload the conversation before retrying that segment, then resume only the necessary IDs. The CLI does not automatically replay mutations.
+
+To clear a mistaken tag when the correct speaker is unknown, use `speakers untag` with selected UUIDs:
+
+```bash
+otter speakers untag OTID -t UUID1 -t UUID2
+```
+
+With no `-t` and no `--all`, `speakers untag` also lists segments. `--all` removes the tag from every segment and requires `--yes` to confirm. Based on Otter's Help Center documentation, untagging affects only the specific paragraph — clearing does not propagate across a voice cluster; repeat as needed in other paragraphs.
 
 Commands check Otter's JSON status as well as the HTTP status. An explicit non-`OK` API status fails even with HTTP 200, and malformed JSON success responses fail instead of becoming empty results. JSON export errors are reported before writing an output file. API and export HTTP errors retain their status and retry guidance when the server sends a non-JSON error page.
 
