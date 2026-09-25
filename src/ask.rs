@@ -12,7 +12,7 @@ pub fn ask(question: String, as_json: bool, timeout_secs: u64, debug: bool) {
 
     // Token discovery: env var first, then scan login, then scan user.
     let mut debug_notes: Vec<String> = Vec::new();
-    let mut token_source = String::new();
+    let token_source: String;
     let token_env = std::env::var("OTTERAI_WS_TOKEN")
         .ok()
         .filter(|s| !s.trim().is_empty());
@@ -20,9 +20,9 @@ pub fn ask(question: String, as_json: bool, timeout_secs: u64, debug: bool) {
         .as_ref()
         .map(|s| looks_like_jwt(s))
         .unwrap_or(false);
-    let token = if let Some(_) = token_env {
+    let token = if let Some(env_tok) = token_env {
         token_source = "env:OTTERAI_WS_TOKEN".into();
-        token_env.unwrap()
+        env_tok
     } else if let Some((path, tok)) = find_jwt_in_value(&login.data, "") {
         token_source = format!("login:{path}");
         tok
@@ -53,7 +53,7 @@ pub fn ask(question: String, as_json: bool, timeout_secs: u64, debug: bool) {
         debug_notes.push(format!("user keys: {}", user_keys.join(", ")));
 
         // Scan hits by location (without printing values)
-        eprintln!("Debug: using websocket token from {token_source}");
+        eprintln!("Debug: using websocket token from {}", token_source);
         eprintln!("Debug: env: {}", if env_hit { "hit" } else { "no" });
         if let Some((path, _)) = find_jwt_in_value(&login.data, "") {
             eprintln!("Debug: login.json: hit at {path}");
@@ -142,7 +142,7 @@ pub fn ask(question: String, as_json: bool, timeout_secs: u64, debug: bool) {
     std::thread::spawn(move || {
         let mut latest: Option<Value> = None;
         loop {
-            match socket.read_message() {
+            match socket.read() {
                 Ok(msg) if msg.is_text() => {
                     if let Ok(v) =
                         serde_json::from_str::<Value>(&msg.into_text().unwrap_or_default())
@@ -241,7 +241,7 @@ fn find_jwt_in_value(root: &Value, path: &str) -> Option<(String, String)> {
 }
 
 fn looks_like_jwt(s: &str) -> bool {
-    let mut parts = s.split('.').take(3).collect::<Vec<_>>();
+    let parts = s.split('.').take(3).collect::<Vec<_>>();
     if parts.len() != 3 {
         return false;
     }
@@ -338,7 +338,7 @@ fn otid_from_url(url: &str) -> Option<String> {
     let rest = &url[locate + needle.len()..];
     let end = rest
         .find(|c: char| c == '?' || c == '#' || c == '/' || c.is_whitespace())
-        .unwrap_or_else(|| rest.len());
+        .unwrap_or(rest.len());
     let otid = &rest[..end];
     if otid.is_empty() {
         None
