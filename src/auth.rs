@@ -22,6 +22,24 @@ pub fn authenticated_client() -> Client {
     client
 }
 
+/// Like `authenticated_client()`, but also returns the raw login response.
+pub fn authenticated_client_with_login() -> (Client, otter::ApiResponse) {
+    let (username, password) = config::load_credentials();
+    let (Some(username), Some(password)) = (username, password) else {
+        die("Not logged in. Run 'otter login' first.");
+    };
+
+    let mut client = match Client::new() {
+        Ok(client) => client,
+        Err(err) => die(format!("Login failed: {err}")),
+    };
+    let result = api(client.login(&username, &password));
+    if !result.ok() {
+        die(format!("Login failed: {}", result_repr(&result)));
+    }
+    (client, result)
+}
+
 pub fn login(username: Option<String>, password: Option<String>) {
     let username = username.unwrap_or_else(|| prompt("Username: "));
     let password = password.unwrap_or_else(prompt_password);

@@ -197,6 +197,8 @@ pub struct Client {
     http: reqwest::blocking::Client,
     jar: Arc<Jar>,
     userid: Option<String>,
+    /// Debug: JWT-shaped scan of the most recent login response headers.
+    login_header_jwt_scan: Option<Vec<(String, bool)>>,
 }
 
 impl Client {
@@ -212,6 +214,7 @@ impl Client {
             http,
             jar,
             userid: None,
+            login_header_jwt_scan: None,
         })
     }
 
@@ -243,6 +246,14 @@ impl Client {
             .basic_auth(username, Some(password))
             .send()?;
 
+        // Debug: scan headers for JWT-shaped values (never stored or printed).
+        let mut header_scan = Vec::new();
+        for (name, value) in response.headers().iter() {
+            let found = value.to_str().ok().is_some_and(looks_like_jwt_str);
+            header_scan.push((name.as_str().to_string(), found));
+        }
+        self.login_header_jwt_scan = Some(header_scan);
+
         self.accept_login(handle_response(response)?)
     }
 
@@ -256,6 +267,30 @@ impl Client {
             self.userid = numeric_id(&result.data["userid"]);
         }
         Ok(result)
+    }
+
+    /// Debug: names of cookies for https://otter.ai and whether their values look like JWTs.
+    pub fn debug_cookie_names_and_jwt_hits(&self) -> Vec<(String, bool)> {
+        let url = "https://otter.ai/".parse().expect("static url parses");
+        let Some(header) = self.jar.cookies(&url) else {
+            return Vec::new();
+        };
+        let text = header.to_str().unwrap_or_default();
+        text.split("; ")
+            .filter(|pair| !pair.is_empty())
+            .map(|pair| {
+                let mut parts = pair.splitn(2, '=');
+                let name = parts.next().unwrap_or_default().to_string();
+                let value = parts.next().unwrap_or_default();
+                let found = looks_like_jwt_str(value);
+                (name, found)
+            })
+            .collect()
+    }
+
+    /// Debug: header names from the most recent login response, plus whether a JWT-like value was present.
+    pub fn debug_login_header_jwt_scan(&self) -> Option<Vec<(String, bool)>> {
+        self.login_header_jwt_scan.clone()
     }
 
     pub fn get_user(&self) -> Result<ApiResponse, Error> {
@@ -655,6 +690,27 @@ impl Client {
         handle_acknowledgement(response, "add_folder_speeches")
     }
 
+    /// GET /get_jwt_token: returns a websocket JWT in `token`
+    pub fn get_ws_token_get(&self) -> Result<ApiResponse, Error> {
+        let response = self
+            .http
+            .get(format!("{API_BASE_URL}get_jwt_token"))
+            .send()?;
+        handle_response(response)
+    }
+
+    /// POST /get_jwt_token: some deployments require POST with an empty JSON body
+    pub fn get_ws_token_post(&self) -> Result<ApiResponse, Error> {
+        let response = self
+            .http
+            .post(format!("{API_BASE_URL}get_jwt_token"))
+            .header("x-csrftoken", self.csrf_token())
+            .header("referer", "https://otter.ai/")
+            .json(&serde_json::json!({}))
+            .send()?;
+        handle_response(response)
+    }
+
     fn move_request(
         &self,
         folder_id: &str,
@@ -678,6 +734,35 @@ impl Client {
             .header("x-csrftoken", self.csrf_token())
             .header("referer", "https://otter.ai/")
             .form(&[("speech_otid_list", speech_ids.join(","))]))
+    }
+
+    /// Build the POST to send a message to Otter's AI Chat in a given thread.
+    /// The server acknowledges the message (status OK) and streams the answer
+    /// over the websocket; the acknowledgement does not include the answer.
+    fn chat_message_request(
+        &self,
+        thread_uuid: &str,
+        text: &str,
+    ) -> Result<reqwest::blocking::RequestBuilder, Error> {
+        self.userid()?; // ensure we're logged in to keep behavior consistent
+        Ok(self
+            .http
+            .post(format!("{API_BASE_URL}chat/session/{thread_uuid}/message"))
+            .header("x-csrftoken", self.csrf_token())
+            .header("referer", "https://otter.ai/")
+            .json(&json!({
+                "text": text,
+                "mode": "advanced",
+                "appid": "otter-web",
+                "thread_uuid": thread_uuid,
+            })))
+    }
+
+    /// Send a message to AI Chat; returns the server acknowledgement which
+    /// includes message_uuid and session_uuid. The answer is streamed via WS.
+    pub fn send_chat_message(&self, thread_uuid: &str, text: &str) -> Result<ApiResponse, Error> {
+        let response = self.chat_message_request(thread_uuid, text)?.send()?;
+        handle_acknowledgement(response, "chat/session/<thread_uuid>/message")
     }
 }
 
@@ -743,6 +828,21 @@ fn save_export(
         status,
         data: Value::Object(data),
         retry_after_seconds: None,
+    })
+}
+
+fn looks_like_jwt_str(s: &str) -> bool {
+    let parts = s.split('.').take(3).collect::<Vec<_>>();
+    if parts.len() != 3 {
+        return false;
+    }
+    if !parts[0].starts_with("eyJ") {
+        return false;
+    }
+    parts.iter().all(|p| {
+        !p.is_empty()
+            && p.chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
     })
 }
 
@@ -1412,5 +1512,38 @@ mod tests {
         let speaker = json!({"id": 1, "speaker_name": "Alice"});
         assert!(!speaker_matches(&speaker, ""));
         assert!(!speaker_matches(&speaker, "   "));
+    }
+
+    #[test]
+    fn chat_request_includes_expected_path_headers_and_body() {
+        let mut client = Client::new().unwrap();
+        client.userid = Some("123".into());
+        let tid = "00000000-0000-4000-8000-000000000000";
+        let text = "What action items came up in my meetings this week?";
+        let request = client
+            .chat_message_request(tid, text)
+            .unwrap()
+            .build()
+            .unwrap();
+        assert_eq!(request.method(), reqwest::Method::POST);
+        assert_eq!(
+            request.url().path(),
+            format!("/forward/api/v1/chat/session/{tid}/message")
+        );
+        // CSRF and Referer are included like other write endpoints.
+        assert!(request.headers().contains_key("x-csrftoken"));
+        assert_eq!(request.headers()["referer"], "https://otter.ai/");
+        // JSON body preserves key order for stable assertions.
+        let expected = serde_json::json!({
+            "text": text,
+            "mode": "advanced",
+            "appid": "otter-web",
+            "thread_uuid": tid
+        })
+        .to_string();
+        assert_eq!(
+            request.body().unwrap().as_bytes().unwrap(),
+            expected.as_bytes()
+        );
     }
 }
