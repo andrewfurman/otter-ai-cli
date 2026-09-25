@@ -155,7 +155,7 @@ pub fn uuid_v4() -> String {
     // UUID v4: set version and variant bits.
     bytes[6] = (bytes[6] & 0x0f) | 0x40; // version 4
     bytes[8] = (bytes[8] & 0x3f) | 0x80; // variant 10xx
-    // Format 8-4-4-4-12 hex
+                                         // Format 8-4-4-4-12 hex
     let mut s = String::with_capacity(36);
     for (i, b) in bytes.iter().enumerate() {
         if [4, 6, 8, 10].contains(&i) {

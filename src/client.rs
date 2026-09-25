@@ -22,6 +22,18 @@ pub struct AdvancedSearchParamNames {
     pub end_date: &'static str,
 }
 
+/// Grouped options for archive-level advanced_search to avoid long parameter lists.
+#[derive(Clone, Copy)]
+pub struct AdvancedSearchOptions<'a> {
+    pub query: Option<&'a str>,
+    pub speaker: Option<&'a str>,
+    pub begin_date: Option<i64>,
+    pub end_date: Option<i64>,
+    pub size: u32,
+    pub relevance: bool,
+    pub session_id: &'a str,
+}
+
 pub const DEFAULT_ADVANCED_SEARCH_PARAMS: AdvancedSearchParamNames = AdvancedSearchParamNames {
     size: "size",
     session_id: "session_id",
@@ -328,84 +340,58 @@ impl Client {
             .query(&[("otid", speech_id), ("title", title)]))
     }
 
-    /// Build an archive-level advanced search request.
+    /// Build an archive-level advanced search request from grouped options.
     /// Confirmed params from web capture: size, session_id, relevance, appid=otter-web.
     /// Observed filters: query (keyword), speakers (display name), begin_date/end_date (epoch seconds).
     /// When a speaker is None, the parameter is omitted; multiple speakers should be
     /// issued as separate requests by the caller (server param is 'speakers').
-    pub fn advanced_search_request(
-        &self,
-        q: Option<&str>,
-        speaker: Option<&str>,
-        begin_date: Option<i64>,
-        end_date: Option<i64>,
-        size: u32,
-        relevance: bool,
-        session_id: &str,
-    ) -> reqwest::blocking::RequestBuilder {
-        self.advanced_search_request_with_params(
-            q,
-            speaker,
-            begin_date,
-            end_date,
-            size,
-            relevance,
-            session_id,
-            DEFAULT_ADVANCED_SEARCH_PARAMS,
-        )
-    }
-
     pub fn advanced_search_request_with_params(
         &self,
-        q: Option<&str>,
-        speaker: Option<&str>,
-        begin_date: Option<i64>,
-        end_date: Option<i64>,
-        size: u32,
-        relevance: bool,
-        session_id: &str,
+        opts: AdvancedSearchOptions<'_>,
         names: AdvancedSearchParamNames,
     ) -> reqwest::blocking::RequestBuilder {
         let mut request = self
             .http
             .get(format!("{API_BASE_URL}advanced_search"))
-            .query(&[(names.size, &size.to_string())])
-            .query(&[(names.session_id, session_id)])
-            .query(&[(names.relevance, if relevance { "true" } else { "false" })])
+            .query(&[(names.size, &opts.size.to_string())])
+            .query(&[(names.session_id, opts.session_id)])
+            .query(&[(
+                names.relevance,
+                if opts.relevance { "true" } else { "false" },
+            )])
             .query(&[(names.appid, "otter-web")]);
-        if let Some(q) = q {
+        if let Some(q) = opts.query {
             if !q.trim().is_empty() {
                 request = request.query(&[(names.query, q)]);
             }
         }
-        if let Some(speaker) = speaker {
+        if let Some(speaker) = opts.speaker {
             if !speaker.trim().is_empty() {
                 request = request.query(&[(names.speakers, speaker)]);
             }
         }
-        if let Some(begin) = begin_date {
+        if let Some(begin) = opts.begin_date {
             request = request.query(&[(names.begin_date, &begin.to_string())]);
         }
-        if let Some(end) = end_date {
+        if let Some(end) = opts.end_date {
             request = request.query(&[(names.end_date, &end.to_string())]);
         }
         request
     }
 
     /// Execute an archive-level advanced search request.
-    pub fn advanced_search(
+    pub fn advanced_search_opts(
         &self,
-        q: Option<&str>,
-        speaker: Option<&str>,
-        begin_date: Option<i64>,
-        end_date: Option<i64>,
-        size: u32,
-        relevance: bool,
-        session_id: &str,
+        opts: AdvancedSearchOptions<'_>,
     ) -> Result<ApiResponse, Error> {
         let response = self
-            .advanced_search_request(q, speaker, begin_date, end_date, size, relevance, session_id)
+            .advanced_search_request_with_params(opts, DEFAULT_ADVANCED_SEARCH_PARAMS)
             .send()?;
+        handle_response(response)
+    }
+    /// Fetch the next page by absolute URL when the server supplies a `next` link.
+    pub fn advanced_search_next(&self, next_url: &str) -> Result<ApiResponse, Error> {
+        let response = self.http.get(next_url).send()?;
         handle_response(response)
     }
 
@@ -885,19 +871,21 @@ mod tests {
 
     #[test]
     fn advanced_search_request_builds_expected_query() {
-        use super::DEFAULT_ADVANCED_SEARCH_PARAMS as N;
+        use super::{AdvancedSearchOptions as Opts, DEFAULT_ADVANCED_SEARCH_PARAMS as N};
         let client = super::Client::new().unwrap();
         // UUID v4-shaped fixture
         let session = "123e4567-e89b-4d3a-a456-426614174000";
         let request = client
             .advanced_search_request_with_params(
-                Some("Disney"),
-                Some("Kate Furman"),
-                Some(1790000000),
-                Some(1790100000),
-                500,
-                true,
-                session,
+                Opts {
+                    query: Some("Disney"),
+                    speaker: Some("Kate Furman"),
+                    begin_date: Some(1790000000),
+                    end_date: Some(1790100000),
+                    size: 500,
+                    relevance: true,
+                    session_id: session,
+                },
                 N,
             )
             .build()

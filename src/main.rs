@@ -3,9 +3,9 @@ mod batch_rename;
 mod folders;
 mod groups;
 mod pagination;
+mod search;
 mod speakers;
 mod speeches;
-mod search;
 mod util;
 
 use clap::{CommandFactory, FromArgMatches, Parser, Subcommand};
@@ -80,6 +80,9 @@ enum Command {
         /// Filter by speaker display name (repeatable)
         #[arg(long, value_delimiter = ',', value_parser = clap::builder::NonEmptyStringValueParser::new())]
         speaker: Vec<String>,
+        /// Print request/response debug info to stderr
+        #[arg(long)]
+        debug: bool,
         /// Start date (YYYY-MM-DD) in America/New_York
         #[arg(long, value_parser = clap::builder::NonEmptyStringValueParser::new())]
         from: Option<String>,
@@ -398,6 +401,7 @@ fn main() {
         Command::Search {
             query,
             speaker,
+            debug,
             from,
             to,
             days,
@@ -410,7 +414,17 @@ fn main() {
             } else {
                 search::SortMode::Relevant
             };
-            search::run(query, speaker, from, to, days, mode, limit, json)
+            search::run(search::SearchOptions {
+                query,
+                speakers: speaker,
+                from,
+                to,
+                days,
+                sort: mode,
+                limit,
+                as_json: json,
+                debug,
+            })
         }
     }
 }
@@ -544,6 +558,7 @@ mod tests {
             Command::Search {
                 query,
                 speaker,
+                debug: _,
                 from,
                 to,
                 days,

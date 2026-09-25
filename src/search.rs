@@ -3,10 +3,8 @@ use serde_json::{json, Value};
 
 use crate::auth::authenticated_client;
 use crate::pagination::collect_pages;
-use crate::util::{
-    api, fail, format_duration, format_timestamp, print_json, result_repr,
-    truthy, value_str,
-};
+use crate::util::{api, fail, format_duration, format_timestamp, print_json, truthy, value_str};
+use otter::client::AdvancedSearchOptions as SearchReqOpts;
 
 const DEFAULT_LIMIT: u32 = 500;
 const WIDEN_DAYS_FOR_TITLE_TIME: i64 = 14; // extend end to catch imported recordings
@@ -17,17 +15,30 @@ pub enum SortMode {
     Recent,
 }
 
-#[allow(clippy::too_many_arguments)]
-pub fn run(
-    query: Option<String>,
-    speakers: Vec<String>,
-    from: Option<String>,
-    to: Option<String>,
-    days: Option<u32>,
-    sort: SortMode,
-    limit: Option<u32>,
-    as_json: bool,
-) {
+pub struct SearchOptions {
+    pub query: Option<String>,
+    pub speakers: Vec<String>,
+    pub from: Option<String>,
+    pub to: Option<String>,
+    pub days: Option<u32>,
+    pub sort: SortMode,
+    pub limit: Option<u32>,
+    pub as_json: bool,
+    pub debug: bool,
+}
+
+pub fn run(options: SearchOptions) {
+    let SearchOptions {
+        query,
+        speakers,
+        from,
+        to,
+        days,
+        sort,
+        limit,
+        as_json,
+        debug,
+    } = options;
     // Validate arguments before logging in.
     if days.is_some() && (from.is_some() || to.is_some()) {
         fail("--days cannot be combined with --from/--to");
@@ -42,8 +53,13 @@ pub fn run(
             .unwrap_or_else(|| invalid_date(&from, "--from must be YYYY-MM-DD"));
         let end = to
             .as_deref()
-            .map(start_of_day_exclusive_et)
-            .unwrap_or_else(|| start_of_day_exclusive_et(&today_yyyy_mm_dd()));
+            .map(|t| {
+                start_of_day_exclusive_et(t)
+                    .unwrap_or_else(|| invalid_date(t, "--to must be YYYY-MM-DD"))
+            })
+            .unwrap_or_else(|| {
+                start_of_day_exclusive_et(&today_yyyy_mm_dd()).expect("today is valid")
+            });
         if end <= begin {
             fail("--to must not be earlier than --from");
         }
@@ -62,17 +78,28 @@ pub fn run(
     let client = authenticated_client();
     let session_id = crate::util::uuid_v4();
 
-    // When filtering by a calendar date window, widen the server window to catch
-    // imported recordings whose upload time differs from title-embedded time.
-    let (server_begin, server_end) = widen_server_window(begin, end);
+    // For searches with query/speakers, do not send an end_date; filter locally by recorded_at.
+    // For date-only searches, attempt advanced_search with a begin (and possibly end) first.
+    let (server_begin, server_end) =
+        if query.as_deref().is_none_or(str::is_empty) && speakers.is_empty() {
+            widen_server_window(begin, end)
+        } else {
+            (begin, None)
+        };
 
     // Case 1: Date-only window (no keyword, no speaker).
     // Try advanced_search with only begin/end. If it fails, fall back to list.
-    if query.as_deref().map_or(true, str::is_empty) && speakers.is_empty() {
+    if query.as_deref().is_none_or(str::is_empty) && speakers.is_empty() {
         if let (Some(begin), Some(end)) = (server_begin, server_end) {
-            let result = api(client.advanced_search(
-                None, None, Some(begin), Some(end), limit, relevance, &session_id,
-            ));
+            let result = api(client.advanced_search_opts(SearchReqOpts {
+                query: None,
+                speaker: None,
+                begin_date: Some(begin),
+                end_date: Some(end),
+                size: limit,
+                relevance,
+                session_id: &session_id,
+            }));
             if result.ok() && truthy(&result.data["hits"]) {
                 let mut hits = result.data["hits"].as_array().cloned().unwrap_or_default();
                 hits = apply_user_window_filter(hits, begin, end);
@@ -87,19 +114,19 @@ pub fn run(
     let mut hits: Option<Vec<Value>> = None;
     if speakers.is_empty() {
         // Single search
-        let result = api(client.advanced_search(
-            query.as_deref(),
-            None,
-            server_begin,
-            server_end,
-            limit,
-            relevance,
-            &session_id,
-        ));
-        if !result.ok() {
-            fail(format!("Search failed: {}", result_repr(&result)));
-        }
-        let mut list = result.data["hits"].as_array().cloned().unwrap_or_default();
+        let (mut list, _meta) = fetch_all_hits(
+            &client,
+            SearchReqOpts {
+                query: query.as_deref(),
+                speaker: None,
+                begin_date: server_begin,
+                end_date: server_end,
+                size: limit,
+                relevance,
+                session_id: &session_id,
+            },
+            debug,
+        );
         if let (Some(b), Some(e)) = (begin, end) {
             list = apply_user_window_filter(list, b, e);
         }
@@ -107,19 +134,21 @@ pub fn run(
     } else {
         // Multiple speakers: intersect conversations containing ALL given speakers.
         for speaker in speakers.iter() {
-            let result = api(client.advanced_search(
-                query.as_deref(),
-                Some(speaker),
-                server_begin,
-                server_end,
-                limit,
-                relevance,
-                &session_id,
-            ));
-            if !result.ok() {
-                fail(format!("Search failed: {}", result_repr(&result)));
-            }
-            let mut speaker_hits = result.data["hits"].as_array().cloned().unwrap_or_default();
+            // For multi-speaker intersection, avoid passing user's limit to each server call.
+            let server_size = DEFAULT_LIMIT;
+            let (mut speaker_hits, _meta) = fetch_all_hits(
+                &client,
+                SearchReqOpts {
+                    query: query.as_deref(),
+                    speaker: Some(speaker),
+                    begin_date: server_begin,
+                    end_date: server_end,
+                    size: server_size,
+                    relevance,
+                    session_id: &session_id,
+                },
+                debug,
+            );
             if let (Some(b), Some(e)) = (begin, end) {
                 speaker_hits = apply_user_window_filter(speaker_hits, b, e);
             }
@@ -139,8 +168,9 @@ pub fn run(
     // Sort locally when requested, since intersections may scramble order.
     if !relevance {
         hits.sort_by_key(|h| {
-            h.get("start_time")
-                .and_then(Value::as_i64)
+            // Prefer parsed recording time; fall back to upload time.
+            parse_title_time_et(&value_str(&h["title"]))
+                .or_else(|| h.get("start_time").and_then(Value::as_i64))
                 .unwrap_or_default()
         });
         hits.reverse(); // most recent first
@@ -204,14 +234,15 @@ fn date_only_fallback_list(
     as_json: bool,
     limit: u32,
 ) {
-    eprintln!("Note: advanced_search with date-only failed; falling back to listing and local filtering.");
+    eprintln!(
+        "Note: advanced_search with date-only failed; falling back to listing and local filtering."
+    );
     // Collect listing pages starting from server_begin (cutoff) and then apply end filter.
     let cutoff = begin.map(|b| b as f64);
     let listing = collect_pages(true, cutoff, 1000, |cursor| {
         client.get_speeches_page("0", 100, "owned", cursor)
     });
-    let speeches = listing
-        .data["speeches"]
+    let speeches = listing.data["speeches"]
         .as_array()
         .cloned()
         .unwrap_or_default();
@@ -237,6 +268,153 @@ fn date_only_fallback_list(
     output_hits(hits, as_json);
 }
 
+fn fetch_all_hits(
+    client: &otter::Client,
+    opts: SearchReqOpts<'_>,
+    debug: bool,
+) -> (Vec<Value>, Value) {
+    use otter::client::DEFAULT_ADVANCED_SEARCH_PARAMS as NAMES;
+    // Build a URL for debug without consuming the sendable builder.
+    let first_url = client
+        .advanced_search_request_with_params(opts, NAMES)
+        .build()
+        .ok()
+        .map(|r| r.url().to_string())
+        .unwrap_or_else(|| "<unavailable>".to_string());
+    let mut result = api(client.advanced_search_opts(opts));
+    if debug {
+        debug_print(&first_url, &result);
+    }
+    let hits = result.data["hits"].as_array().cloned().unwrap_or_default();
+    let mut seen = std::collections::HashSet::new();
+    let mut uniq = Vec::with_capacity(hits.len());
+    for h in hits {
+        let id = value_str(&h["speech_otid"]);
+        if !id.is_empty() && seen.insert(id) {
+            uniq.push(h);
+        }
+    }
+    let mut data_snapshot = result.data.clone();
+    // Follow server-supplied next link, if any.
+    let mut page_count = 1usize;
+    while let Some(next) = extract_next_url(&result.data) {
+        let next_abs = absolutize_next(&next);
+        let page = api(client.advanced_search_next(&next_abs));
+        if debug {
+            debug_print(&next_abs, &page);
+        }
+        let more = page.data["hits"].as_array().cloned().unwrap_or_default();
+        for h in more {
+            let id = value_str(&h["speech_otid"]);
+            if !id.is_empty() && seen.insert(id.clone()) {
+                uniq.push(h);
+            }
+        }
+        data_snapshot = page.data.clone();
+        result = page;
+        page_count += 1;
+        if page_count > 50 {
+            // Safety stop.
+            break;
+        }
+        // Stop early if a completion flag is present.
+        if result
+            .data
+            .get("has_more")
+            .and_then(Value::as_bool)
+            .is_some_and(|b| !b)
+            || result
+                .data
+                .get("end_of_list")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+            || result
+                .data
+                .get("complete")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+        {
+            break;
+        }
+    }
+    (uniq, data_snapshot)
+}
+
+fn extract_next_url(data: &Value) -> Option<String> {
+    data.get("next")
+        .and_then(Value::as_str)
+        .map(|s| s.to_string())
+}
+
+fn absolutize_next(next: &str) -> String {
+    if next.starts_with("http://") || next.starts_with("https://") {
+        next.to_string()
+    } else if next.starts_with('/') {
+        format!("https://otter.ai{next}")
+    } else {
+        // Unexpected; return as-is.
+        next.to_string()
+    }
+}
+
+fn debug_print(url: &str, result: &otter::ApiResponse) {
+    let masked = mask_session(url);
+    let mut lines = Vec::new();
+    lines.push(format!("GET {masked} -> {}", result.status));
+    match &result.data {
+        Value::Object(map) => {
+            let mut keys: Vec<_> = map.keys().cloned().collect();
+            keys.sort();
+            for k in keys {
+                let v = &map[&k];
+                match v {
+                    Value::Array(a) => lines.push(format!("{k}: [array, len={}]", a.len())),
+                    Value::Object(o) => lines.push(format!("{k}: {{object, keys={}}}", o.len())),
+                    Value::String(s) => {
+                        if k != "hits" {
+                            lines.push(format!("{k}: \"{}\"", s));
+                        }
+                    }
+                    other => {
+                        if k != "hits" {
+                            lines.push(format!("{k}: {}", other));
+                        }
+                    }
+                }
+            }
+        }
+        other => {
+            lines.push(format!("data: {other}"));
+        }
+    }
+    eprintln!("{}", lines.join("\n"));
+}
+
+fn mask_session(url: &str) -> String {
+    let mut out = String::new();
+    if let Ok(mut parsed) = url::Url::parse(url) {
+        let mut pairs: Vec<(String, String)> = parsed
+            .query_pairs()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+        for (k, v) in &mut pairs {
+            if k == "session_id" {
+                *v = "****".into();
+            }
+        }
+        parsed
+            .query_pairs_mut()
+            .clear()
+            .extend_pairs(pairs.iter().map(|(k, v)| (&k[..], &v[..])));
+        out = parsed.to_string();
+    }
+    if out.is_empty() {
+        url.to_string()
+    } else {
+        out
+    }
+}
+
 fn start_of_day_et(date: &str) -> Option<i64> {
     let (year, month, day) = split_ymd(date)?;
     match chrono_tz::America::New_York.with_ymd_and_hms(year, month, day, 0, 0, 0) {
@@ -247,17 +425,21 @@ fn start_of_day_et(date: &str) -> Option<i64> {
     }
 }
 
-fn start_of_day_exclusive_et(date: &str) -> i64 {
-    let (year, month, day) = split_ymd(date).unwrap_or_else(|| invalid_date(date, "invalid date"));
-    let next = chrono::NaiveDate::from_ymd_opt(year, month, day)
-        .unwrap()
-        .succ_opt()
-        .unwrap();
-    match chrono_tz::America::New_York
-        .with_ymd_and_hms(next.year(), next.month(), next.day(), 0, 0, 0)
-    {
-        chrono::LocalResult::Single(dt) | chrono::LocalResult::Ambiguous(dt, _) => dt.timestamp(),
-        _ => 0,
+fn start_of_day_exclusive_et(date: &str) -> Option<i64> {
+    let (year, month, day) = split_ymd(date)?;
+    let next = chrono::NaiveDate::from_ymd_opt(year, month, day)?.succ_opt()?;
+    match chrono_tz::America::New_York.with_ymd_and_hms(
+        next.year(),
+        next.month(),
+        next.day(),
+        0,
+        0,
+        0,
+    ) {
+        chrono::LocalResult::Single(dt) | chrono::LocalResult::Ambiguous(dt, _) => {
+            Some(dt.timestamp())
+        }
+        _ => None,
     }
 }
 
@@ -267,7 +449,11 @@ fn split_ymd(date: &str) -> Option<(i32, u32, u32)> {
     if parts.next().is_some() {
         return None;
     }
-    let (y, m, d) = (y.parse::<i32>().ok()?, m.parse::<u32>().ok()?, d.parse::<u32>().ok()?);
+    let (y, m, d) = (
+        y.parse::<i32>().ok()?,
+        m.parse::<u32>().ok()?,
+        d.parse::<u32>().ok()?,
+    );
     Some((y, m, d))
 }
 
@@ -298,18 +484,22 @@ fn last_n_calendar_days_window(days: u32) -> (Option<i64>, Option<i64>) {
     let start = now
         .pred_opt()
         .map(|_| ())
-        .and(Some(now - chrono::Duration::days(i64::from(days.saturating_sub(1)))))
+        .and(Some(
+            now - chrono::Duration::days(i64::from(days.saturating_sub(1))),
+        ))
         .unwrap_or(now);
     let start_ts = match tz.with_ymd_and_hms(start.year(), start.month(), start.day(), 0, 0, 0) {
         chrono::LocalResult::Single(dt) | chrono::LocalResult::Ambiguous(dt, _) => dt.timestamp(),
         _ => 0,
     };
     let tomorrow = now.succ_opt().unwrap_or(now);
-    let end_ts = match tz.with_ymd_and_hms(tomorrow.year(), tomorrow.month(), tomorrow.day(), 0, 0, 0)
-    {
-        chrono::LocalResult::Single(dt) | chrono::LocalResult::Ambiguous(dt, _) => dt.timestamp(),
-        _ => 0,
-    };
+    let end_ts =
+        match tz.with_ymd_and_hms(tomorrow.year(), tomorrow.month(), tomorrow.day(), 0, 0, 0) {
+            chrono::LocalResult::Single(dt) | chrono::LocalResult::Ambiguous(dt, _) => {
+                dt.timestamp()
+            }
+            _ => 0,
+        };
     (Some(start_ts), Some(end_ts))
 }
 
@@ -354,7 +544,10 @@ fn parse_title_time_et(title: &str) -> Option<i64> {
         return None;
     }
     let month = match_mon(mon)?;
-    let day: u32 = day_ordinal.trim_end_matches(['s', 't', 'n', 'd', 'r', 'h']).parse().ok()?;
+    let day: u32 = day_ordinal
+        .trim_end_matches(['s', 't', 'n', 'd', 'r', 'h'])
+        .parse()
+        .ok()?;
     let year: i32 = year.parse().ok()?;
     // time: "7:37am" or "10:05pm"
     let (hm, ampm) = time.split_at(time.len().saturating_sub(2));
@@ -402,7 +595,11 @@ fn match_mon(mon: &str) -> Option<u32> {
 }
 
 fn match_snippet(hit: &Value) -> Option<String> {
-    if hit.get("matched_title").and_then(Value::as_bool).unwrap_or(false) {
+    if hit
+        .get("matched_title")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
         let title = value_str(&hit["title"]);
         if !title.is_empty() {
             return Some(ellipsize(&title, 160));
@@ -453,7 +650,10 @@ mod tests {
         // "Mon Sep 21st 2026 @ 7:37am ET" -> check hour/min conversion and ordinal trim
         let title = "Call with A on Mon Sep 21st 2026 @ 7:37am ET";
         let ts = parse_title_time_et(title).expect("parse title time");
-        let dt = chrono_tz::America::New_York.timestamp_opt(ts, 0).single().unwrap();
+        let dt = chrono_tz::America::New_York
+            .timestamp_opt(ts, 0)
+            .single()
+            .unwrap();
         assert_eq!(dt.year(), 2026);
         assert_eq!(dt.month(), 9);
         assert_eq!(dt.day(), 21);
@@ -461,11 +661,17 @@ mod tests {
         // PM
         let title = "Update on Tue Oct 3rd 2026 @ 12:05pm ET";
         let ts = parse_title_time_et(title).expect("parse title time");
-        let dt = chrono_tz::America::New_York.timestamp_opt(ts, 0).single().unwrap();
+        let dt = chrono_tz::America::New_York
+            .timestamp_opt(ts, 0)
+            .single()
+            .unwrap();
         assert_eq!((dt.hour(), dt.minute()), (12, 5));
         let title = "Evening on Tue Oct 3rd 2026 @ 7:05pm ET";
         let ts = parse_title_time_et(title).expect("parse title time");
-        let dt = chrono_tz::America::New_York.timestamp_opt(ts, 0).single().unwrap();
+        let dt = chrono_tz::America::New_York
+            .timestamp_opt(ts, 0)
+            .single()
+            .unwrap();
         assert_eq!((dt.hour(), dt.minute()), (19, 5));
     }
 
@@ -473,21 +679,21 @@ mod tests {
     fn inclusive_end_date_is_next_day_midnight_et_and_dst_boundaries() {
         // 2024-03-10 is DST start date; midnight exclusive end is 2024-03-11 00:00 ET.
         let begin = start_of_day_et("2024-03-10").unwrap();
-        let end = start_of_day_exclusive_et("2024-03-10");
+        let end = start_of_day_exclusive_et("2024-03-10").unwrap();
         assert!(end > begin);
         // 2024-11-03 is DST end date; still compute midnight next day in ET.
         let begin = start_of_day_et("2024-11-03").unwrap();
-        let end = start_of_day_exclusive_et("2024-11-03");
+        let end = start_of_day_exclusive_et("2024-11-03").unwrap();
         assert!(end > begin);
     }
 
     #[test]
     fn widen_server_extends_end_only() {
         let begin = Some(1_700_000_000);
-        let end = Some(1_700_086_400); // +1 day
-        let (wb, we) = widen_server_window(begin, end);
+        let end_val = 1_700_086_400; // +1 day
+        let (wb, we) = widen_server_window(begin, Some(end_val));
         assert_eq!(wb, begin);
-        assert!(we.unwrap() > end.unwrap());
+        assert!(we.unwrap() > end_val);
     }
 
     #[test]
@@ -500,14 +706,17 @@ mod tests {
         });
         add_recorded_at(&mut hit);
         let ts = hit["recorded_at"].as_i64().unwrap();
-        let dt = chrono_tz::America::New_York.timestamp_opt(ts, 0).single().unwrap();
+        let dt = chrono_tz::America::New_York
+            .timestamp_opt(ts, 0)
+            .single()
+            .unwrap();
         assert_eq!((dt.year(), dt.month(), dt.day()), (2026, 9, 21));
     }
 
     #[test]
     fn window_filter_honors_title_time_when_upload_outside() {
         let begin = start_of_day_et("2026-09-21").unwrap();
-        let end = start_of_day_exclusive_et("2026-09-24");
+        let end = start_of_day_exclusive_et("2026-09-24").unwrap();
         let inside = json!({
             "title": "Talk on Tue Sep 22nd 2026 @ 10:00am ET",
             "speech_otid": "A",
@@ -523,4 +732,3 @@ mod tests {
         assert_eq!(filtered[0]["speech_otid"], "A");
     }
 }
-
