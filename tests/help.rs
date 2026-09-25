@@ -35,6 +35,7 @@ fn both_root_help_forms_show_every_command_and_rate_guidance() {
             "speakers list",
             "speakers create",
             "speakers tag",
+            "speakers untag",
             "folders list",
             "folders create",
             "folders rename",

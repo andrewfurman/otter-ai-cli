@@ -175,7 +175,7 @@ pub fn get(speech_id: String, as_json: bool) {
         println!("{}", "-".repeat(40));
         for segment in segments {
             let speaker = match value_str(&segment["speaker_name"]) {
-                s if s.is_empty() => "Unknown".to_string(),
+                s if s.is_empty() => "Untagged".to_string(),
                 s => s,
             };
             println!("[{speaker}]: {}", value_str(&segment["transcript"]));

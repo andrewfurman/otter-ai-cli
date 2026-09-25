@@ -232,6 +232,25 @@ enum SpeakersCommand {
         #[arg(long)]
         json: bool,
     },
+    /// Clear a speaker tag on transcript segment(s)
+    #[command(
+        after_help = "Examples:\n  otter speakers untag OTID                 List segments without changing them\n  otter speakers untag OTID -t UUID1 -t UUID2\n\nSelected segments share one login and one HTTP session. Duplicate UUIDs are\nremoved, and every UUID is checked against this conversation before any clears save.\n--all removes the speaker tag from EVERY segment; combine with --yes to confirm.\nOn HTTP 429, stop and honor Retry-After / retry_after; without a delay, wait 60-90\nseconds and retry slowly. The batch stops on its first error, reports progress,\nand exits nonzero. Reload a failed segment before retrying an uncertain write."
+    )]
+    Untag {
+        speech_id: String,
+        /// Transcript UUID(s) to untag; repeat -t or separate UUIDs with commas
+        #[arg(short, long, value_delimiter = ',', value_parser = clap::builder::NonEmptyStringValueParser::new())]
+        transcript_uuid: Vec<String>,
+        /// Remove the tag from EVERY segment in the conversation (dangerous)
+        #[arg(short, long, conflicts_with = "transcript_uuid")]
+        all: bool,
+        /// Require explicit confirmation when using --all
+        #[arg(long)]
+        yes: bool,
+        /// Output segment listings or batch results as JSON
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -353,6 +372,13 @@ fn main() {
                 all,
                 json,
             } => speakers::tag(speech_id, speaker_id, transcript_uuid, all, json),
+            SpeakersCommand::Untag {
+                speech_id,
+                transcript_uuid,
+                all,
+                yes,
+                json,
+            } => speakers::untag(speech_id, transcript_uuid, all, yes, json),
         },
         Command::Folders(command) => match command {
             FoldersCommand::List { json } => folders::list(json),
@@ -423,6 +449,38 @@ mod tests {
         assert!(
             Cli::try_parse_from(["otter", "speakers", "tag", "otid", "42", "-t", "a,,b"]).is_err()
         );
+    }
+
+    #[test]
+    fn untag_accepts_repeated_and_comma_separated_uuids() {
+        let cli = Cli::try_parse_from([
+            "otter", "speakers", "untag", "otid", "-t", "a,b", "-t", "c", "--json",
+        ])
+        .unwrap();
+        match cli.command {
+            Command::Speakers(SpeakersCommand::Untag {
+                transcript_uuid,
+                all,
+                yes,
+                json,
+                ..
+            }) => {
+                assert_eq!(transcript_uuid, ["a", "b", "c"]);
+                assert!(!all);
+                assert!(!yes);
+                assert!(json);
+            }
+            _ => panic!("expected speakers untag"),
+        }
+    }
+
+    #[test]
+    fn untag_rejects_all_with_selected_uuids_and_empty_values() {
+        assert!(
+            Cli::try_parse_from(["otter", "speakers", "untag", "otid", "--all", "-t", "uuid"])
+                .is_err()
+        );
+        assert!(Cli::try_parse_from(["otter", "speakers", "untag", "otid", "-t", "a,,b"]).is_err());
     }
 
     #[test]

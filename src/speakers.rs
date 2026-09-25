@@ -160,6 +160,95 @@ pub fn tag(
     }
 }
 
+pub fn untag(
+    speech_id: String,
+    transcript_uuid: Vec<String>,
+    untag_all: bool,
+    yes: bool,
+    as_json: bool,
+) {
+    if untag_all && !yes {
+        fail(String::from(
+            "--all is dangerous: confirm the clear by adding --yes",
+        ));
+    }
+    let client = authenticated_client();
+
+    let speech_result = api(client.get_speech(&speech_id));
+    if !speech_result.ok() {
+        fail(format!(
+            "Failed to get speech: {}",
+            result_repr(&speech_result)
+        ));
+    }
+
+    let transcripts = transcript_segments(&speech_result.data);
+
+    if transcript_uuid.is_empty() && !untag_all {
+        // List available transcript segments.
+        if as_json {
+            let segments: Vec<Value> = transcripts
+                .iter()
+                .map(|t| {
+                    json!({
+                        "uuid": value_str(&t["uuid"]),
+                        "speaker_id": t["speaker_id"],
+                        "speaker_name": if t["speaker_name"].is_string() { t["speaker_name"].clone() } else { json!("Untagged") },
+                        "text_preview": chars_prefix(&value_str(&t["transcript"]), 80),
+                    })
+                })
+                .collect();
+            print_json(&Value::Array(segments));
+        } else {
+            println!("Available transcript segments in {speech_id}:\n");
+            for t in &transcripts {
+                let current = match value_str(&t["speaker_name"]) {
+                    s if s.is_empty() => "Untagged".to_string(),
+                    s => s,
+                };
+                println!("  UUID: {}", value_str(&t["uuid"]));
+                println!("  Speaker: {current}");
+                println!(
+                    "  Text: {}...",
+                    chars_prefix(&value_str(&t["transcript"]), 60)
+                );
+                println!();
+            }
+            println!("Repeat -t <uuid> to clear selected segments in one session. --all removes EVERY tag.");
+        }
+        return;
+    }
+
+    let segments_to_clear = select_segments(&transcripts, &transcript_uuid, untag_all)
+        .unwrap_or_else(|message| fail(message));
+    let report = tag_segments(&segments_to_clear, |uuid| {
+        client.clear_transcript_speaker(&speech_id, uuid)
+    });
+    if as_json {
+        let mut result = serde_json::to_value(&report).expect("report serializes");
+        result["status"] = json!(if report.error.is_none() {
+            "OK"
+        } else {
+            "failed"
+        });
+        result["speech_otid"] = json!(speech_id);
+        print_json(&result);
+    } else {
+        println!(
+            "Cleared {}/{} segments",
+            report.tagged_uuids.len(),
+            segments_to_clear.len()
+        );
+        if report.error.is_some() {
+            eprintln!("Saved UUIDs: {}", report.tagged_uuids.join(","));
+            eprintln!("Unattempted UUIDs: {}", report.unattempted_uuids.join(","));
+        }
+    }
+    if let Some(error) = report.error {
+        fail(format!("Stopped at segment {}: {error}\nReload the failed segment before retrying an uncertain write.", report.failed_uuid.unwrap_or_default()));
+    }
+}
+
 /// Validate the complete selection before saving anything, and keep request order.
 fn select_segments(
     transcripts: &[Value],
