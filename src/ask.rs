@@ -118,13 +118,26 @@ pub fn ask(question: String, as_json: bool, timeout_secs: u64, debug: bool) {
 
     // Open websocket BEFORE sending the chat message to avoid missing frames.
     let thread_uuid = Uuid::new_v4().to_string();
-    let (mut socket, status_code) = match connect_ws(&token) {
+    // Extract numeric user id from login response for WS URL
+    let user_id = value_str(&login.data["userid"]);
+    if user_id.is_empty() {
+        fail("Login data did not include a valid userid");
+    }
+    let dbg_url = format!(
+        "wss://ws.aisense.com/api/v2/client/session_update?token={}&userid={}",
+        "<REDACTED>", user_id
+    );
+    let connect_started = Instant::now();
+    let (mut socket, status_code) = match connect_ws(&token, &user_id) {
         Ok(ok) => ok,
         Err(_err) => fail("Failed to open websocket with the selected token"),
     };
     if debug {
+        eprintln!("Debug: ws url={} (masked)", dbg_url);
         eprintln!("Debug: handshake OK (status={})", status_code);
     }
+    // Send an immediate app-level ping after connect.
+    let _ = socket.write(tungstenite::Message::Text(r#"{"action":"ping"}"#.into()));
 
     // Send the question.
     let ack = crate::util::api(client.send_chat_message(&thread_uuid, &question));
@@ -156,17 +169,15 @@ pub fn ask(question: String, as_json: bool, timeout_secs: u64, debug: bool) {
         matched: usize,
         closed: Option<String>,
         error: Option<String>,
+        elapsed_ms: u128,
     }
     let (tx, rx) = mpsc::channel::<ChatUpdate>();
     let target_uuid = message_uuid.clone();
     let thread_uuid_clone = thread_uuid.clone();
     std::thread::spawn(move || {
-        let mut latest: Option<Value> = None;
         let mut received = 0usize;
         let mut matched = 0usize;
         let mut last_ping = Instant::now();
-        let mut closed: Option<String> = None;
-        let mut error: Option<String> = None;
         loop {
             match socket.read() {
                 Ok(msg) if msg.is_text() => {
@@ -216,7 +227,6 @@ pub fn ask(question: String, as_json: bool, timeout_secs: u64, debug: bool) {
                             let is_user = author == "user";
                             if tmatch && !(echo_uuid || is_user) {
                                 matched += 1;
-                                latest = Some(message.clone());
                                 if message["finished"].as_bool() == Some(true) {
                                     let _ = tx.send(ChatUpdate {
                                         message: message.clone(),
@@ -224,12 +234,13 @@ pub fn ask(question: String, as_json: bool, timeout_secs: u64, debug: bool) {
                                         matched,
                                         closed: None,
                                         error: None,
+                                        elapsed_ms: connect_started.elapsed().as_millis(),
                                     });
-                                    break;
+                                    return;
                                 }
                             }
                         }
-                        if last_ping.elapsed() >= Duration::from_secs(20) {
+                        if last_ping.elapsed() >= Duration::from_secs(15) {
                             let _ = socket
                                 .write(tungstenite::Message::Text(r#"{"action":"ping"}"#.into()));
                             last_ping = Instant::now();
@@ -247,8 +258,15 @@ pub fn ask(question: String, as_json: bool, timeout_secs: u64, debug: bool) {
                     } else {
                         "unknown".into()
                     };
-                    closed = Some(reason);
-                    break;
+                    let _ = tx.send(ChatUpdate {
+                        message: Value::Null,
+                        received,
+                        matched,
+                        closed: Some(reason),
+                        error: None,
+                        elapsed_ms: connect_started.elapsed().as_millis(),
+                    });
+                    return;
                 }
                 Ok(_) => {} // ignore non-text frames
                 Err(err) => {
@@ -256,7 +274,7 @@ pub fn ask(question: String, as_json: bool, timeout_secs: u64, debug: bool) {
                         if ioe.kind() == std::io::ErrorKind::WouldBlock
                             || ioe.kind() == std::io::ErrorKind::TimedOut
                         {
-                            if last_ping.elapsed() >= Duration::from_secs(20) {
+                            if last_ping.elapsed() >= Duration::from_secs(15) {
                                 let _ = socket.write(tungstenite::Message::Text(
                                     r#"{"action":"ping"}"#.into(),
                                 ));
@@ -268,32 +286,29 @@ pub fn ask(question: String, as_json: bool, timeout_secs: u64, debug: bool) {
                     match err {
                         tungstenite::Error::ConnectionClosed
                         | tungstenite::Error::AlreadyClosed => {
-                            closed = Some("closed".into());
+                            let _ = tx.send(ChatUpdate {
+                                message: Value::Null,
+                                received,
+                                matched,
+                                closed: Some("closed".into()),
+                                error: None,
+                                elapsed_ms: connect_started.elapsed().as_millis(),
+                            });
                         }
                         other => {
-                            error = Some(format!("{other}"));
+                            let _ = tx.send(ChatUpdate {
+                                message: Value::Null,
+                                received,
+                                matched,
+                                closed: None,
+                                error: Some(format!("{other}")),
+                                elapsed_ms: connect_started.elapsed().as_millis(),
+                            });
                         }
                     }
-                    break;
+                    return;
                 }
             }
-        }
-        if let Some(v) = latest {
-            let _ = tx.send(ChatUpdate {
-                message: v,
-                received,
-                matched,
-                closed,
-                error,
-            });
-        } else {
-            let _ = tx.send(ChatUpdate {
-                message: Value::Null,
-                received,
-                matched,
-                closed,
-                error,
-            });
         }
     });
 
@@ -309,18 +324,18 @@ pub fn ask(question: String, as_json: bool, timeout_secs: u64, debug: bool) {
     if debug {
         if let Some(reason) = &update.closed {
             eprintln!(
-                "Debug: websocket closed: {} (frames received={} matched={})",
-                reason, update.received, update.matched
+                "Debug: websocket closed: {} (frames received={} matched={} elapsed={}ms)",
+                reason, update.received, update.matched, update.elapsed_ms
             );
         } else if let Some(err) = &update.error {
             eprintln!(
-                "Debug: websocket error: {} (frames received={} matched={})",
-                err, update.received, update.matched
+                "Debug: websocket error: {} (frames received={} matched={} elapsed={}ms)",
+                err, update.received, update.matched, update.elapsed_ms
             );
         } else {
             eprintln!(
-                "Debug: frames received={} matched={}",
-                update.received, update.matched
+                "Debug: frames received={} matched={} elapsed={}ms",
+                update.received, update.matched, update.elapsed_ms
             );
         }
     }
@@ -335,6 +350,27 @@ pub fn ask(question: String, as_json: bool, timeout_secs: u64, debug: bool) {
     }
     let sources = extract_sources(&blocks);
 
+    if answer_text.trim().is_empty() {
+        let errmsg = if let Some(reason) = update.closed {
+            format!("websocket closed: {}", reason)
+        } else if let Some(err) = update.error {
+            format!("websocket error: {err}")
+        } else {
+            "no answer text returned".into()
+        };
+        if as_json {
+            let error_obj = json!({
+                "error": errmsg,
+                "frames_received": update.received,
+                "frames_matched": update.matched
+            });
+            print_json(&error_obj);
+        } else {
+            eprintln!("Error: {}", errmsg);
+        }
+        std::process::exit(1);
+    }
+
     if as_json {
         let out = json!({
             "question": question,
@@ -346,11 +382,7 @@ pub fn ask(question: String, as_json: bool, timeout_secs: u64, debug: bool) {
         });
         print_json(&out);
     } else {
-        if answer_text.trim().is_empty() {
-            println!("[No answer text returned]");
-        } else {
-            println!("{answer_text}");
-        }
+        println!("{answer_text}");
         if !sources.is_empty() {
             println!("\nSources:");
             for s in sources {
@@ -486,6 +518,7 @@ struct ConnectError;
 
 fn connect_ws(
     token: &str,
+    userid: &str,
 ) -> Result<
     (
         tungstenite::WebSocket<tungstenite::stream::MaybeTlsStream<std::net::TcpStream>>,
@@ -494,8 +527,9 @@ fn connect_ws(
     ConnectError,
 > {
     let ws_url = format!(
-        "wss://ws.aisense.com/api/v2/client/session_update?token={}",
-        urlencoding::encode(token)
+        "wss://ws.aisense.com/api/v2/client/session_update?token={}&userid={}",
+        urlencoding::encode(token),
+        urlencoding::encode(userid)
     );
     use tungstenite::client::IntoClientRequest;
     let mut req = ws_url
