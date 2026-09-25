@@ -17,7 +17,7 @@ pub struct AdvancedSearchParamNames {
     pub relevance: &'static str,
     pub appid: &'static str,
     pub query: &'static str,
-    pub speaker: &'static str,
+    pub speakers: &'static str,
     pub begin_date: &'static str,
     pub end_date: &'static str,
 }
@@ -27,9 +27,10 @@ pub const DEFAULT_ADVANCED_SEARCH_PARAMS: AdvancedSearchParamNames = AdvancedSea
     session_id: "session_id",
     relevance: "relevance",
     appid: "appid",
-    // Using 'query' (not 'q') until the live capture confirms exact names.
+    // Confirmed from live capture: keyword is 'query' (not 'q').
     query: "query",
-    speaker: "speaker",
+    // Confirmed from live capture: speaker filter is 'speakers' (plural).
+    speakers: "speakers",
     begin_date: "begin_date",
     end_date: "end_date",
 };
@@ -329,9 +330,9 @@ impl Client {
 
     /// Build an archive-level advanced search request.
     /// Confirmed params from web capture: size, session_id, relevance, appid=otter-web.
-    /// Observed filters: q (keyword), speaker (display name), begin_date/end_date (epoch seconds).
-    /// When `speaker` is None, the parameter is omitted; multiple speakers should be
-    /// issued as separate requests by the caller (API support for repeats unknown).
+    /// Observed filters: query (keyword), speakers (display name), begin_date/end_date (epoch seconds).
+    /// When a speaker is None, the parameter is omitted; multiple speakers should be
+    /// issued as separate requests by the caller (server param is 'speakers').
     pub fn advanced_search_request(
         &self,
         q: Option<&str>,
@@ -379,7 +380,7 @@ impl Client {
         }
         if let Some(speaker) = speaker {
             if !speaker.trim().is_empty() {
-                request = request.query(&[(names.speaker, speaker)]);
+                request = request.query(&[(names.speakers, speaker)]);
             }
         }
         if let Some(begin) = begin_date {
@@ -853,7 +854,8 @@ mod tests {
     fn advanced_search_request_builds_expected_query() {
         use super::DEFAULT_ADVANCED_SEARCH_PARAMS as N;
         let client = super::Client::new().unwrap();
-        let session = "cli-123";
+        // UUID v4-shaped fixture
+        let session = "123e4567-e89b-4d3a-a456-426614174000";
         let request = client
             .advanced_search_request_with_params(
                 Some("Disney"),
@@ -880,7 +882,7 @@ mod tests {
             ("relevance", "true"),
             ("session_id", session),
             ("size", "500"),
-            ("speaker", "Kate Furman"),
+            ("speakers", "Kate Furman"),
         ];
         for (key, value) in expected {
             assert!(
