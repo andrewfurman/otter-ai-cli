@@ -661,15 +661,14 @@ fn render_nodes(
                                 let item_type =
                                     item.get("type").and_then(Value::as_str).unwrap_or("");
                                 if item_type == "text_block" {
-                                    // Finish previous group.
-                                    push_current(&mut groups, &mut current);
-                                    // Collect this block's inline content.
+                                    // Starting a new paragraph: finalize any previous group.
+                                    if !current.is_empty() {
+                                        push_current(&mut groups, &mut current);
+                                    }
+                                    // Collect this block's inline content into current
                                     if let Some(inline) = item.get("children") {
                                         collect_inline(inline, &mut current, sources);
                                     }
-                                    // Keep as current group (do not push yet) to allow following
-                                    // inline siblings (e.g., `speech` nodes) to join this line.
-                                    push_current(&mut groups, &mut current);
                                 } else if item_type == "list_block" || item_type == "list_item" {
                                     // Rare nested list: finish current groups and render nested.
                                     push_current(&mut groups, &mut current);
@@ -679,7 +678,7 @@ fn render_nodes(
                                     collect_inline(item, &mut current, sources);
                                 }
                             }
-                            // Push any trailing inline group
+                            // Push the trailing inline group (main line or last sub-line)
                             push_current(&mut groups, &mut current);
                         }
 
@@ -768,25 +767,23 @@ fn render_nodes(
                     }
                 }
                 "speech" => {
-                    // Inline citation: title text + [otid]
-                    let mut title = map
+                    // Inline citation: render as [otid] only (no title inline)
+                    // Drop any preceding " [" bracket from sibling text nodes.
+                    strip_trailing_open_bracket(out);
+                    let title = map
                         .get("text")
                         .and_then(Value::as_str)
                         .unwrap_or("")
                         .to_string();
-                    title = normalize_title(&title);
+                    let title = normalize_title(&title);
                     let otid = value_str(map.get("otid").unwrap_or(&Value::Null));
-                    if !title.is_empty() {
+                    if !otid.is_empty() {
                         if in_list_item && !out.ends_with(' ') {
                             out.push(' ');
                         }
-                        out.push_str(&title);
-                        if !otid.is_empty() {
-                            out.push(' ');
-                            out.push('[');
-                            out.push_str(&otid);
-                            out.push(']');
-                        }
+                        out.push('[');
+                        out.push_str(&otid);
+                        out.push(']');
                     }
                     // Collect source
                     if !otid.is_empty() {
@@ -932,17 +929,13 @@ fn collect_inline(node: &Value, out: &mut String, sources: &mut Vec<SourceInfo>)
                         .unwrap_or("")
                         .to_string();
                     let otid = value_str(map.get("otid").unwrap_or(&Value::Null));
-                    if !title.is_empty() {
+                    if !otid.is_empty() {
                         if !out.is_empty() && !out.ends_with(' ') {
                             out.push(' ');
                         }
-                        out.push_str(&title);
-                        if !otid.is_empty() {
-                            out.push(' ');
-                            out.push('[');
-                            out.push_str(&otid);
-                            out.push(']');
-                        }
+                        out.push('[');
+                        out.push_str(&otid);
+                        out.push(']');
                     }
                     if !otid.is_empty() {
                         let speech_id = value_str(map.get("speech_id").unwrap_or(&Value::Null));
