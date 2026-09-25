@@ -26,6 +26,7 @@ pub struct SearchOptions {
     pub as_json: bool,
     pub debug: bool,
     pub tries: u32,
+    pub max_seconds: u32,
 }
 
 pub fn run(options: SearchOptions) {
@@ -40,6 +41,7 @@ pub fn run(options: SearchOptions) {
         as_json,
         debug,
         tries,
+        max_seconds,
     } = options;
     // Validate arguments before logging in.
     if days.is_some() && (from.is_some() || to.is_some()) {
@@ -133,45 +135,88 @@ pub fn run(options: SearchOptions) {
         }
         hits = Some(list);
     } else if !speakers.is_empty() && query.as_deref().is_none_or(str::is_empty) {
-        // Speaker-only: prefer deterministic listing if speakers are present in listing payload.
-        if let Some(mut list) =
-            list_and_filter_by_speakers(&client, begin, end, &speakers, limit, debug)
-        {
-            if let (Some(b), Some(e)) = (begin, end) {
-                list = apply_user_window_filter(list, b, e);
+        // Speaker-only with no dates: windowed advanced_search union, walking back in time.
+        let mut total: std::collections::HashMap<String, Value> = std::collections::HashMap::new();
+        let start_clock = std::time::Instant::now();
+        let window_days: i64 = 90;
+        let window_secs = window_days * 86400;
+        let mut window_end = start_of_day_exclusive_et(&today_yyyy_mm_dd()).unwrap_or(0);
+        let floor_ts = window_end.saturating_sub(10 * 365 * 86400); // ~10 years back
+        let mut empty_windows = 0u32;
+        let stop_after_empty = 3u32;
+        while window_end > floor_ts {
+            if start_clock.elapsed().as_secs() >= max_seconds as u64 {
+                let covered_to = format_timestamp(&json!(window_end));
+                eprintln!(
+                    "Time budget reached ({}s). Coverage so far back to {}.",
+                    max_seconds, covered_to
+                );
+                break;
             }
-            hits = Some(list);
-        } else {
-            // Fallback: multi-try union with speakers=, then intersect across speakers.
+            let window_begin = window_end.saturating_sub(window_secs);
+            let mut window_hits_opt: Option<Vec<Value>> = None;
             for speaker in speakers.iter() {
-                let server_size = DEFAULT_LIMIT;
-                let mut speaker_hits = union_advanced_search_tries(
+                let mut sh = union_advanced_search_tries(
                     &client,
                     MultiTryOpts {
                         query: None,
                         speaker: Some(speaker.as_str()),
-                        begin_date: server_begin,
-                        end_date: server_end,
-                        size: server_size,
+                        begin_date: Some(window_begin),
+                        end_date: Some(window_end),
+                        size: DEFAULT_LIMIT,
                         relevance,
                         tries,
                         debug,
                     },
                 );
-                if let (Some(b), Some(e)) = (begin, end) {
-                    speaker_hits = apply_user_window_filter(speaker_hits, b, e);
-                }
-                hits = Some(match (hits.take(), Some(speaker_hits)) {
+                sh = apply_user_window_filter(sh, window_begin, window_end);
+                window_hits_opt = Some(match (window_hits_opt.take(), Some(sh)) {
                     (None, Some(h)) => h,
                     (Some(existing), Some(new)) => intersect_by_otid(existing, new),
                     (Some(existing), None) => existing,
                     (None, None) => Vec::new(),
                 });
-                if hits.as_ref().is_some_and(|h| h.is_empty()) {
+                if window_hits_opt.as_ref().is_some_and(|h| h.is_empty()) {
                     break;
                 }
             }
+            let window_hits = window_hits_opt.unwrap_or_default();
+            let mut new_count = 0usize;
+            for hit in window_hits {
+                let otid = value_str(&hit["speech_otid"]);
+                if otid.is_empty() {
+                    continue;
+                }
+                match total.get_mut(&otid) {
+                    Some(existing) => {
+                        if merge_hit(existing, &hit) {
+                            // merged details
+                        }
+                    }
+                    None => {
+                        total.insert(otid, hit);
+                        new_count += 1;
+                    }
+                }
+            }
+            eprintln!(
+                "window {}..{}: +{} (total {})",
+                format_timestamp(&json!(window_begin)),
+                format_timestamp(&json!(window_end)),
+                new_count,
+                total.len()
+            );
+            if new_count == 0 {
+                empty_windows += 1;
+            } else {
+                empty_windows = 0;
+            }
+            if empty_windows >= stop_after_empty {
+                break;
+            }
+            window_end = window_begin;
         }
+        hits = Some(total.into_values().collect());
     } else {
         // Keyword + speaker(s): union several calls per speaker, then intersect conversations
         // containing ALL given speakers.
@@ -337,8 +382,6 @@ fn union_advanced_search_tries(client: &otter::Client, opts: MultiTryOpts<'_>) -
     use std::time::Duration;
     let tries = opts.tries.clamp(1, 10);
     let mut by_otid: HashMap<String, Value> = HashMap::new();
-    let mut non_empty_count = 0usize;
-    let mut consecutive_no_new = 0usize;
     for attempt in 0..tries {
         let session = crate::util::uuid_v4();
         let req = SearchReqOpts {
@@ -392,19 +435,53 @@ fn union_advanced_search_tries(client: &otter::Client, opts: MultiTryOpts<'_>) -
                 by_otid.len()
             );
         }
-        if round_hits > 0 {
-            non_empty_count += 1;
-            if new_this_round == 0 {
-                consecutive_no_new += 1;
-            } else {
-                consecutive_no_new = 0;
-            }
-        }
-        if non_empty_count >= 3 && consecutive_no_new >= 2 {
-            break;
-        }
         if attempt + 1 < tries {
-            sleep(Duration::from_millis(1500));
+            sleep(Duration::from_millis(3500));
+        }
+    }
+    if by_otid.is_empty() {
+        // Suspicious: two extra attempts with longer spacing.
+        for extra in 0..2 {
+            sleep(Duration::from_millis(5000 + extra * 2000));
+            let session = crate::util::uuid_v4();
+            let req = SearchReqOpts {
+                query: opts.query,
+                speaker: opts.speaker,
+                begin_date: opts.begin_date,
+                end_date: opts.end_date,
+                size: opts.size,
+                relevance: opts.relevance,
+                session_id: &session,
+            };
+            let result = api(client.advanced_search_opts(req));
+            if should_log_progress(opts.debug) {
+                use otter::client::DEFAULT_ADVANCED_SEARCH_PARAMS as NAMES;
+                let built = client
+                    .advanced_search_request_with_params(req, NAMES)
+                    .build()
+                    .ok()
+                    .map(|r| r.url().to_string())
+                    .unwrap_or_else(|| "<unavailable>".to_string());
+                debug_print(&built, &result);
+            }
+            let hits = result.data["hits"].as_array().cloned().unwrap_or_default();
+            for hit in hits {
+                let otid = value_str(&hit["speech_otid"]);
+                if otid.is_empty() {
+                    continue;
+                }
+                match by_otid.get_mut(&otid) {
+                    Some(existing) => {
+                        let _ = merge_hit(existing, &hit);
+                    }
+                    None => {
+                        by_otid.insert(otid, hit);
+                    }
+                }
+            }
+            if !by_otid.is_empty() {
+                break;
+            }
         }
     }
     by_otid.into_values().collect()
@@ -475,84 +552,6 @@ fn should_log_progress(debug: bool) -> bool {
     }
     use std::io::{self, IsTerminal};
     io::stderr().is_terminal()
-}
-
-fn list_and_filter_by_speakers(
-    client: &otter::Client,
-    begin: Option<i64>,
-    end: Option<i64>,
-    speakers: &[String],
-    limit: u32,
-    debug: bool,
-) -> Option<Vec<Value>> {
-    // Fetch listing pages (owned, all folders) starting from begin cutoff.
-    let cutoff = begin.map(|b| b as f64);
-    let mut listed_total: usize = 0;
-    let listing = collect_pages(true, cutoff, 1000, |cursor| {
-        // Per-page timeout/retry wrapper: 3 attempts, 1s backoff.
-        let mut attempts = 0;
-        let mut backoff_ms = 1000u64;
-        loop {
-            attempts += 1;
-            match client.get_speeches_page("0", 100, "owned", cursor) {
-                Ok(resp) => {
-                    let page_len = resp.data["speeches"].as_array().map_or(0, Vec::len);
-                    listed_total = listed_total.saturating_add(page_len);
-                    if should_log_progress(debug) {
-                        eprintln!("listed {} speeches…", listed_total);
-                    }
-                    return Ok(resp);
-                }
-                Err(err) => {
-                    if attempts >= 3 {
-                        return Err(err);
-                    }
-                    std::thread::sleep(std::time::Duration::from_millis(backoff_ms));
-                    backoff_ms = (backoff_ms * 2).min(8000);
-                }
-            }
-        }
-    });
-    if listing.error.is_some() || !listing.complete {
-        eprintln!("Warning: listing speakers path incomplete or failed; falling back to advanced_search union. Results may be incomplete.");
-        return None;
-    }
-    let speeches = listing.data["speeches"].as_array()?.clone();
-    // Check presence of speakers metadata.
-    let has_speakers = speeches.iter().any(|s| s.get("speakers").is_some());
-    if !has_speakers {
-        return None;
-    }
-    let wanted: Vec<String> = speakers.iter().map(|s| s.to_lowercase()).collect();
-    let mut hits: Vec<Value> = speeches
-        .into_iter()
-        .filter(|s| {
-            let names: std::collections::HashSet<String> = s["speakers"]
-                .as_array()
-                .unwrap_or(&vec![])
-                .iter()
-                .filter_map(|sp| sp.get("speaker_name").and_then(Value::as_str))
-                .map(|n| n.trim().to_lowercase())
-                .collect();
-            wanted.iter().all(|w| names.contains(w))
-        })
-        .map(|s| {
-            json!({
-                "speech_otid": s["otid"],
-                "title": s["title"],
-                "duration": s["duration"],
-                "start_time": s["created_at"],
-                "matched_transcripts": [],
-            })
-        })
-        .collect();
-    if let (Some(b), Some(e)) = (begin, end) {
-        hits = apply_user_window_filter(hits, b, e);
-    }
-    if hits.len() > limit as usize {
-        hits.truncate(limit as usize);
-    }
-    Some(hits)
 }
 
 // advanced_search does not provide pagination; multiple non-deterministic calls are unioned instead.

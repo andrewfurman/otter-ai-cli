@@ -86,6 +86,9 @@ enum Command {
         /// Number of tries for unioning nondeterministic search (1-10, default 5)
         #[arg(long, default_value_t = 5, value_parser = clap::value_parser!(u32).range(1..=10))]
         tries: u32,
+        /// Overall wall-clock budget in seconds for multi-window/speaker searches (default 120)
+        #[arg(long, default_value_t = 120, value_parser = clap::value_parser!(u32).range(10..=600))]
+        max_seconds: u32,
         /// Start date (YYYY-MM-DD) in America/New_York
         #[arg(long, value_parser = clap::builder::NonEmptyStringValueParser::new())]
         from: Option<String>,
@@ -406,6 +409,7 @@ fn main() {
             speaker,
             debug,
             tries,
+            max_seconds,
             from,
             to,
             days,
@@ -429,6 +433,7 @@ fn main() {
                 as_json: json,
                 debug,
                 tries,
+                max_seconds,
             })
         }
     }
