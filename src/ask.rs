@@ -435,6 +435,16 @@ pub fn ask(question: String, as_json: bool, timeout_secs: u64, debug: bool) {
     }
 }
 
+fn normalize_title(title: &str) -> String {
+    let trimmed = title.trim();
+    if trimmed.starts_with('[') && trimmed.ends_with(']') {
+        let inner = &trimmed[1..trimmed.len() - 1];
+        inner.trim().to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
 #[derive(Clone)]
 struct FoundJwt {
     path: String,
@@ -633,7 +643,7 @@ fn render_nodes(
                     let mut line = String::new();
                     if let Some(children) = map.get("children") {
                         collect_inline(children, &mut line, sources);
-                        let trimmed = line.trim();
+                        let trimmed = line.trim_end();
                         if !trimmed.is_empty() {
                             out.push_str(&"  ".repeat(indent));
                             out.push_str("- ");
@@ -644,13 +654,20 @@ fn render_nodes(
                         render_nested_lists(children, indent + 1, out, sources);
                     }
                 }
+                "divider" | "hr" => {
+                    if !out.ends_with('\n') {
+                        out.push('\n');
+                    }
+                    out.push_str(&"  ".repeat(indent));
+                    out.push_str("---\n");
+                }
                 "text_block" => {
                     // Paragraph of inline text
                     let mut para = String::new();
                     if let Some(children) = map.get("children") {
                         collect_inline(children, &mut para, sources);
                     }
-                    let trimmed = para.trim();
+                    let trimmed = para.trim_end();
                     if !trimmed.is_empty() {
                         // Paragraph separation
                         if !out.is_empty() && !out.ends_with("\n\n") {
@@ -664,21 +681,36 @@ fn render_nodes(
                     }
                 }
                 "text" => {
-                    let t = map.get("text").and_then(Value::as_str).unwrap_or("");
-                    if !t.is_empty() {
-                        if in_list_item && !out.ends_with(' ') {
-                            out.push(' ');
+                    // Paragraph-like text node: include children as inline, then newline
+                    let mut para = String::new();
+                    if let Some(t) = map.get("text").and_then(Value::as_str) {
+                        if !t.is_empty() {
+                            para.push_str(t);
                         }
-                        out.push_str(t);
+                    }
+                    if let Some(children) = map.get("children") {
+                        collect_inline(children, &mut para, sources);
+                    }
+                    let trimmed = para.trim_end();
+                    if !trimmed.is_empty() {
+                        if !out.is_empty() && !out.ends_with("\n\n") {
+                            if !out.ends_with('\n') {
+                                out.push('\n');
+                            }
+                            out.push('\n');
+                        }
+                        out.push_str(trimmed);
+                        out.push('\n');
                     }
                 }
                 "speech" => {
                     // Inline citation: title text + [otid]
-                    let title = map
+                    let mut title = map
                         .get("text")
                         .and_then(Value::as_str)
                         .unwrap_or("")
                         .to_string();
+                    title = normalize_title(&title);
                     let otid = value_str(map.get("otid").unwrap_or(&Value::Null));
                     if !title.is_empty() {
                         if in_list_item && !out.ends_with(' ') {
@@ -772,6 +804,10 @@ fn collect_inline(node: &Value, out: &mut String, sources: &mut Vec<SourceInfo>)
                         return;
                     }
                 }
+            }
+            // Skip nested list blocks/items for inline collection; they render separately
+            if node_type == "list_block" || node_type == "list_item" || node_type == "divider" {
+                return;
             }
             match node_type {
                 "text" => {
@@ -950,14 +986,17 @@ mod tests {
 
     #[test]
     fn render_fixture_lists_and_sources() {
-        let value: Value =
-            serde_json::from_str(include_str!("../tests/fixtures/ask_emily.json")).unwrap();
+        let value: Value = serde_json::from_str(include_str!("../tests/fixtures/ask_sample.json"))
+            .unwrap_or_else(|_| {
+                // Fallback to anonymized file if renamed only
+                serde_json::from_str(include_str!("../tests/fixtures/ask_emily.json")).unwrap()
+            });
         let blocks = &value["blocks"];
         let mut sources = Vec::new();
         let text = render_blocks(blocks, &mut sources);
-        assert!(text.contains("- Call about quarterly planning"));
-        assert!(text.contains("- Follow-up sync"));
+        assert!(text.contains("- First Meeting"));
+        assert!(text.contains("- Second Meeting"));
         assert_eq!(sources.len(), 1);
-        assert_eq!(sources[0].otid, "abc123");
+        assert_eq!(sources[0].otid, "TESTOTID1");
     }
 }
