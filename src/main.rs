@@ -206,7 +206,9 @@ enum SpeakersCommand {
         json: bool,
     },
     /// Clear a speaker tag on transcript segment(s)
-    #[command(after_help = "Examples:\n  otter speakers untag OTID                 List segments without changing them\n  otter speakers untag OTID -t UUID1 -t UUID2\n\nSelected segments share one login and one HTTP session. Duplicate UUIDs are\nremoved, and every UUID is checked against this conversation before any clears save.\n--all removes the speaker tag from EVERY segment; combine with --yes to confirm.\nOn HTTP 429, stop and honor Retry-After / retry_after; without a delay, wait 60-90\nseconds and retry slowly. The batch stops on its first error, reports progress,\nand exits nonzero. Reload a failed segment before retrying an uncertain write.")]
+    #[command(
+        after_help = "Examples:\n  otter speakers untag OTID                 List segments without changing them\n  otter speakers untag OTID -t UUID1 -t UUID2\n\nSelected segments share one login and one HTTP session. Duplicate UUIDs are\nremoved, and every UUID is checked against this conversation before any clears save.\n--all removes the speaker tag from EVERY segment; combine with --yes to confirm.\nOn HTTP 429, stop and honor Retry-After / retry_after; without a delay, wait 60-90\nseconds and retry slowly. The batch stops on its first error, reports progress,\nand exits nonzero. Reload a failed segment before retrying an uncertain write."
+    )]
     Untag {
         speech_id: String,
         /// Transcript UUID(s) to untag; repeat -t or separate UUIDs with commas
@@ -430,10 +432,10 @@ mod tests {
 
     #[test]
     fn untag_rejects_all_with_selected_uuids_and_empty_values() {
-        assert!(Cli::try_parse_from([
-            "otter", "speakers", "untag", "otid", "--all", "-t", "uuid"
-        ])
-        .is_err());
+        assert!(
+            Cli::try_parse_from(["otter", "speakers", "untag", "otid", "--all", "-t", "uuid"])
+                .is_err()
+        );
         assert!(Cli::try_parse_from(["otter", "speakers", "untag", "otid", "-t", "a,,b"]).is_err());
     }
 

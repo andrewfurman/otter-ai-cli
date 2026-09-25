@@ -226,7 +226,11 @@ pub fn untag(
     });
     if as_json {
         let mut result = serde_json::to_value(&report).expect("report serializes");
-        result["status"] = json!(if report.error.is_none() { "OK" } else { "failed" });
+        result["status"] = json!(if report.error.is_none() {
+            "OK"
+        } else {
+            "failed"
+        });
         result["speech_otid"] = json!(speech_id);
         print_json(&result);
     } else {
