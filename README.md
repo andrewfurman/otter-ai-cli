@@ -84,7 +84,7 @@ otter search --speaker "Kate Furman" --days 7 --json
 Notes:
 
 - Dates are calendar days in US Eastern. `--to` is inclusive; the CLI sends the following day's midnight to the server.
-- Multiple `--speaker` flags intersect (ALL). This matched how we naturally read “with Kate and Emily.” API support for repeated `speaker` query params is unknown, so the CLI does per-speaker requests and intersects results locally.
+- Multiple `--speaker` flags intersect (ALL). This matches how we naturally read “with Kate and Emily.” Each flag is sent as a separate search using the server's `speakers` param (plural), and results are intersected locally so only conversations containing ALL speakers are shown.
 - Date-only searches try Otter's `advanced_search` with only a date window. If that fails, the CLI falls back to the existing `speeches list` path for that window and formats results similarly. This behavior is explicit in `--json` via a `hits` array either way.
 - Imported recordings: Otter's `start_time` is upload time, not when recorded. When a title ends with “… on Mon Sep 21st 2026 @ 7:37am ET”, the CLI parses that time, widens the server window by a few days, and filters locally so date windows behave as expected.
 - `--sort` is `relevant` (default) or `recent`. `--limit` caps displayed rows; `--json` returns structured results (`hits`).
