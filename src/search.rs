@@ -636,7 +636,7 @@ fn list_speakers_exact_name(
             let covered_to = if oldest == i64::MAX {
                 "unknown".to_string()
             } else {
-                format_timestamp(&json!(oldest))
+                format!("{} (upload date)", format_timestamp(&json!(oldest)))
             };
             eprintln!(
                 "Time budget reached ({}s). Coverage so far back to {}.",
@@ -655,7 +655,11 @@ fn list_speakers_exact_name(
             .as_array()
             .cloned()
             .unwrap_or_default();
-        eprintln!("listed {} speeches…", arr.len());
+        eprintln!(
+            "listed {} speeches (total {})…",
+            arr.len(),
+            results.len() + arr.len()
+        );
         if arr.is_empty() {
             break;
         }
@@ -663,11 +667,6 @@ fn list_speakers_exact_name(
             let created = s["created_at"].as_i64().unwrap_or(0);
             if created > 0 && created < oldest {
                 oldest = created;
-            }
-            let within_begin = begin.map(|b| (created as f64) >= b as f64).unwrap_or(true);
-            let within_end = end.map(|e| (created as f64) < e as f64).unwrap_or(true);
-            if !(within_begin && within_end) {
-                continue;
             }
             // Exact, case-insensitive match: all requested speaker names must be present.
             let names: HashSet<String> = s["speakers"]
@@ -709,6 +708,10 @@ fn list_speakers_exact_name(
         if results.len() >= limit as usize {
             break;
         }
+    }
+    // Apply recording-time filter when a window is present.
+    if let (Some(b), Some(e)) = (begin, end) {
+        results = apply_user_window_filter(results, b, e);
     }
     if results.len() > limit as usize {
         results.truncate(limit as usize);
@@ -810,14 +813,11 @@ fn widen_server_window(begin: Option<i64>, end: Option<i64>) -> (Option<i64>, Op
 }
 
 fn within_user_window(hit: &Value, user_begin: i64, user_end: i64) -> bool {
-    let start = hit.get("start_time").and_then(Value::as_i64).unwrap_or(0);
-    if (user_begin..user_end).contains(&start) {
-        return true;
-    }
     if let Some(parsed) = parse_title_time_et(&value_str(&hit["title"])) {
         return (user_begin..user_end).contains(&parsed);
     }
-    false
+    let start = hit.get("start_time").and_then(Value::as_i64).unwrap_or(0);
+    (user_begin..user_end).contains(&start)
 }
 
 fn apply_user_window_filter(hits: Vec<Value>, user_begin: i64, user_end: i64) -> Vec<Value> {
@@ -1055,5 +1055,34 @@ mod tests {
         let filtered = apply_user_window_filter(vec![inside, outside], begin, end);
         assert_eq!(filtered.len(), 1);
         assert_eq!(filtered[0]["speech_otid"], "A");
+    }
+
+    #[test]
+    fn window_filter_includes_recorded_inside_when_uploaded_later() {
+        let begin = start_of_day_et("2026-09-21").unwrap();
+        let end = start_of_day_exclusive_et("2026-09-25").unwrap();
+        let recorded_inside_uploaded_later = json!({
+            "title": "Meeting on Thu Sep 24th 2026 @ 9:00am ET",
+            "speech_otid": "IN",
+            // Uploaded next day
+            "start_time": start_of_day_et("2026-09-25").unwrap(),
+        });
+        let filtered = apply_user_window_filter(vec![recorded_inside_uploaded_later], begin, end);
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0]["speech_otid"], "IN");
+    }
+
+    #[test]
+    fn window_filter_excludes_recorded_outside_when_uploaded_inside() {
+        let begin = start_of_day_et("2026-09-01").unwrap();
+        let end = start_of_day_exclusive_et("2026-10-01").unwrap();
+        let recorded_outside_uploaded_inside = json!({
+            "title": "Call on Thu Mar 5th 2026 @ 11:00am ET",
+            "speech_otid": "OUT",
+            // Uploaded mid-Sep
+            "start_time": start_of_day_et("2026-09-18").unwrap(),
+        });
+        let filtered = apply_user_window_filter(vec![recorded_outside_uploaded_inside], begin, end);
+        assert!(filtered.is_empty());
     }
 }
