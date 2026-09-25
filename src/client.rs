@@ -595,6 +595,27 @@ impl Client {
         handle_acknowledgement(response, "add_folder_speeches")
     }
 
+    /// GET /get_jwt_token: returns a websocket JWT in `token`
+    pub fn get_ws_token_get(&self) -> Result<ApiResponse, Error> {
+        let response = self
+            .http
+            .get(format!("{API_BASE_URL}get_jwt_token"))
+            .send()?;
+        handle_response(response)
+    }
+
+    /// POST /get_jwt_token: some deployments require POST with an empty JSON body
+    pub fn get_ws_token_post(&self) -> Result<ApiResponse, Error> {
+        let response = self
+            .http
+            .post(format!("{API_BASE_URL}get_jwt_token"))
+            .header("x-csrftoken", self.csrf_token())
+            .header("referer", "https://otter.ai/")
+            .json(&serde_json::json!({}))
+            .send()?;
+        handle_response(response)
+    }
+
     fn move_request(
         &self,
         folder_id: &str,

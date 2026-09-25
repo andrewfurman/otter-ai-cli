@@ -22,12 +22,15 @@ pub fn ask(question: String, as_json: bool, timeout_secs: u64, debug: bool) {
         .collect::<Vec<_>>();
     let cookie_hits = client.debug_cookie_names_and_jwt_hits();
     let user = crate::util::api(client.get_user());
-    let speeches_once = crate::util::api(client.get_speeches("0", 1, "owned"));
     let login_jwts = collect_jwts(&login.data, "");
     let user_jwts = collect_jwts(&user.data, "");
-    let speeches_jwts = collect_jwts(&speeches_once.data, "");
+    // Optional: scan one speeches page for debug only (not used as a token)
+    let speeches_jwts = {
+        let resp = crate::util::api(client.get_speeches("0", 1, "owned"));
+        collect_jwts(&resp.data, "")
+    };
 
-    // Token discovery: env var first, then scan login/user preferred keys, then speeches[0].
+    // Token discovery: env var first; then /forward/api/v1/get_jwt_token (GET first, then POST {})
     let token_source: String;
     let token_env = std::env::var("OTTERAI_WS_TOKEN")
         .ok()
@@ -40,25 +43,7 @@ pub fn ask(question: String, as_json: bool, timeout_secs: u64, debug: bool) {
         token_source = "env:OTTERAI_WS_TOKEN".into();
         env_tok
     } else {
-        // Preferred keys in login/user
-        let preferred_login = preferred_jwts(&login_jwts);
-        let preferred_user = preferred_jwts(&user_jwts);
-        // From most recent speech only (paths containing "speeches[0].")
-        let preferred_speeches = preferred_speeches_jwt(&speeches_jwts);
-
-        // Build candidate list labeled with their paths
-        let mut candidates: Vec<(String, String)> = Vec::new();
-        for item in preferred_login {
-            candidates.push((format!("login.json:{}", item.path), item.token));
-        }
-        for item in preferred_user {
-            candidates.push((format!("user.json:{}", item.path), item.token));
-        }
-        for item in preferred_speeches {
-            candidates.push((format!("speeches.json:{}", item.path), item.token));
-        }
-
-        // Always print the debug report before attempting/possibly failing.
+        // Always print the debug report before attempting get_jwt_token.
         if debug {
             eprintln!("Debug: env: {}", if env_hit { "hit" } else { "no" });
             eprintln!(
@@ -83,39 +68,49 @@ pub fn ask(question: String, as_json: bool, timeout_secs: u64, debug: bool) {
             print_jwt_report("user.json", &user_jwts);
             print_jwt_report("speeches.json", &speeches_jwts);
         }
-
-        // Try candidates in order until websocket handshake succeeds.
-        let mut chosen: Option<(String, String)> = None;
-        let mut preopened_socket: Option<
-            tungstenite::WebSocket<tungstenite::stream::MaybeTlsStream<std::net::TcpStream>>,
-        > = None;
-        for (label, tok) in &candidates {
-            match connect_ws(tok) {
-                Ok((sock, _status)) => {
-                    chosen = Some((label.clone(), tok.clone()));
-                    preopened_socket = Some(sock);
-                    break;
+        // Try GET then POST to /get_jwt_token
+        let get = crate::util::api(client.get_ws_token_get());
+        if debug {
+            eprintln!("Debug: get_jwt_token GET status={}", get.status);
+        }
+        if get.ok() {
+            if let Some(tok) = get.data.get("token").and_then(Value::as_str) {
+                token_source = "get_jwt_token:GET".into();
+                tok.to_string()
+            } else {
+                // Fallback to POST
+                let post = crate::util::api(client.get_ws_token_post());
+                if debug {
+                    eprintln!("Debug: get_jwt_token POST status={}", post.status);
                 }
-                Err(err) => {
-                    if debug {
-                        eprintln!(
-                            "Debug: websocket handshake failed for {label}: {}",
-                            err.code.unwrap_or(0)
-                        );
+                if post.ok() {
+                    if let Some(tok) = post.data.get("token").and_then(Value::as_str) {
+                        token_source = "get_jwt_token:POST".into();
+                        tok.to_string()
+                    } else {
+                        fail("Could not locate a websocket token for AI Chat. Run with --debug for hints.");
                     }
+                } else {
+                    fail("Could not locate a websocket token for AI Chat. Run with --debug for hints.");
                 }
+            }
+        } else {
+            // Try POST when GET not OK
+            let post = crate::util::api(client.get_ws_token_post());
+            if debug {
+                eprintln!("Debug: get_jwt_token POST status={}", post.status);
+            }
+            if post.ok() {
+                if let Some(tok) = post.data.get("token").and_then(Value::as_str) {
+                    token_source = "get_jwt_token:POST".into();
+                    tok.to_string()
+                } else {
+                    fail("Could not locate a websocket token for AI Chat. Run with --debug for hints.");
+                }
+            } else {
+                fail("Could not locate a websocket token for AI Chat. Run with --debug for hints.");
             }
         }
-        let Some((label, tok)) = chosen else {
-            if debug && candidates.is_empty() {
-                eprintln!("Debug: no preferred JWT candidates found in login/user/speeches JSON");
-            }
-            fail("Could not locate a websocket token for AI Chat. Run with --debug for hints.");
-        };
-        token_source = label;
-        // Save the pre-opened socket in outer scope via a global mutable captured below.
-        PREOPENED_SOCKET.with(|slot| slot.replace(preopened_socket));
-        tok
     };
     if debug {
         eprintln!("Debug: using websocket token from {}", token_source);
@@ -123,18 +118,13 @@ pub fn ask(question: String, as_json: bool, timeout_secs: u64, debug: bool) {
 
     // Open websocket BEFORE sending the chat message to avoid missing frames.
     let thread_uuid = Uuid::new_v4().to_string();
-    // Use the pre-opened socket if present; otherwise connect with the chosen token.
-    thread_local! {
-        static PREOPENED_SOCKET: std::cell::RefCell<Option<tungstenite::WebSocket<tungstenite::stream::MaybeTlsStream<std::net::TcpStream>>>> = const { std::cell::RefCell::new(None) };
-    }
-    let mut socket = if let Some(sock) = PREOPENED_SOCKET.with(|slot| slot.replace(None)) {
-        sock
-    } else {
-        match connect_ws(&token) {
-            Ok((sock, _)) => sock,
-            Err(_err) => fail("Failed to open websocket with the selected token"),
-        }
+    let (mut socket, status_code) = match connect_ws(&token) {
+        Ok(ok) => ok,
+        Err(_err) => fail("Failed to open websocket with the selected token"),
     };
+    if debug {
+        eprintln!("Debug: handshake OK (status={})", status_code);
+    }
 
     // Send the question.
     let ack = crate::util::api(client.send_chat_message(&thread_uuid, &question));
@@ -144,11 +134,15 @@ pub fn ask(question: String, as_json: bool, timeout_secs: u64, debug: bool) {
             crate::util::result_repr(&ack)
         ));
     }
-    let message_uuid = value_str(&ack.data["message_uuid"]);
+    let message_obj = &ack.data["message"];
+    let message_uuid = value_str(&message_obj["message_uuid"]);
     if message_uuid.is_empty() {
+        if debug {
+            eprintln!("Debug: POST ack keys: {}", list_paths(&ack.data).join(", "));
+        }
         fail("Chat acknowledgement did not include message_uuid; cannot receive answer.");
     }
-    let session_uuid = value_str(&ack.data["session_uuid"]);
+    let session_uuid = value_str(&message_obj["session_uuid"]);
     let effective_thread_uuid = if session_uuid.is_empty() {
         thread_uuid.clone()
     } else {
@@ -156,13 +150,23 @@ pub fn ask(question: String, as_json: bool, timeout_secs: u64, debug: bool) {
     };
 
     // Read updates until finished for this message_uuid, with timeout.
-    let (tx, rx) = mpsc::channel::<Value>();
+    struct ChatUpdate {
+        message: Value,
+        received: usize,
+        matched: usize,
+    }
+    let (tx, rx) = mpsc::channel::<ChatUpdate>();
     let target_uuid = message_uuid.clone();
+    let thread_uuid_clone = thread_uuid.clone();
     std::thread::spawn(move || {
         let mut latest: Option<Value> = None;
+        let mut received = 0usize;
+        let mut matched = 0usize;
+        let mut last_ping = Instant::now();
         loop {
             match socket.read() {
                 Ok(msg) if msg.is_text() => {
+                    received += 1;
                     if let Ok(v) =
                         serde_json::from_str::<Value>(&msg.into_text().unwrap_or_default())
                     {
@@ -173,13 +177,27 @@ pub fn ask(question: String, as_json: bool, timeout_secs: u64, debug: bool) {
                             && v["action"] == "update"
                         {
                             let message = &v["message"];
-                            if value_str(&message["chat_message_uuid"]) == target_uuid {
+                            let tmatch = value_str(&message["thread_uuid"]) == thread_uuid_clone;
+                            let qmatch = value_str(&message["query_message_uuid"]) == target_uuid;
+                            let author = value_str(&message["author"]).to_ascii_lowercase();
+                            let is_assistant = author == "assistant";
+                            if tmatch && (qmatch || is_assistant) {
+                                matched += 1;
                                 latest = Some(message.clone());
                                 if message["finished"].as_bool() == Some(true) {
-                                    let _ = tx.send(message.clone());
+                                    let _ = tx.send(ChatUpdate {
+                                        message: message.clone(),
+                                        received,
+                                        matched,
+                                    });
                                     break;
                                 }
                             }
+                        }
+                        if last_ping.elapsed() >= Duration::from_secs(20) {
+                            let _ = socket
+                                .write(tungstenite::Message::Text(r#"{"action":"ping"}"#.into()));
+                            last_ping = Instant::now();
                         }
                     }
                 }
@@ -188,21 +206,38 @@ pub fn ask(question: String, as_json: bool, timeout_secs: u64, debug: bool) {
             }
         }
         if let Some(v) = latest {
-            let _ = tx.send(v);
+            let _ = tx.send(ChatUpdate {
+                message: v,
+                received,
+                matched,
+            });
         }
     });
 
     let deadline = Instant::now() + Duration::from_secs(timeout_secs);
     let remaining = deadline.saturating_duration_since(Instant::now());
-    let message = match rx.recv_timeout(remaining) {
+    let update = match rx.recv_timeout(remaining) {
         Ok(v) => v,
         Err(_) => fail(format!(
             "Timed out waiting for AI Chat answer after {} seconds",
             timeout_secs
         )),
     };
+    if debug {
+        eprintln!(
+            "Debug: frames received={}, matched={}",
+            update.received, update.matched
+        );
+    }
+    let message = update.message;
     let blocks = message["blocks"].clone();
-    let answer_text = render_blocks(&blocks);
+    let mut answer_text = render_blocks(&blocks);
+    if answer_text.trim().is_empty() {
+        let fallback = value_str(&message["text"]);
+        if !fallback.trim().is_empty() {
+            answer_text = fallback;
+        }
+    }
     let sources = extract_sources(&blocks);
 
     if as_json {
@@ -267,38 +302,6 @@ fn collect_jwts(root: &Value, path: &str) -> Vec<FoundJwt> {
     out
 }
 
-fn preferred_jwts(items: &[FoundJwt]) -> Vec<FoundJwt> {
-    let mut out = Vec::new();
-    for item in items {
-        let key = last_key(&item.path).to_ascii_lowercase();
-        let is_pubsub = key.contains("pubsub_jwt");
-        let is_ws_token = key.contains("ws") && key.contains("token");
-        if is_pubsub || is_ws_token {
-            out.push(item.clone());
-        }
-    }
-    out
-}
-
-fn preferred_speeches_jwt(items: &[FoundJwt]) -> Vec<FoundJwt> {
-    let mut out = Vec::new();
-    for item in items {
-        if item.path.contains("speeches[0].") {
-            let key = last_key(&item.path).to_ascii_lowercase();
-            if key.contains("pubsub_jwt") || (key.contains("ws") && key.contains("token")) {
-                out.push(item.clone());
-            }
-        }
-    }
-    out
-}
-
-fn last_key(path: &str) -> String {
-    // Return the tail segment after the last '.', trimming any trailing array index.
-    let seg = path.rsplit('.').next().unwrap_or(path);
-    seg.to_string()
-}
-
 fn looks_like_jwt(s: &str) -> bool {
     let parts = s.split('.').take(3).collect::<Vec<_>>();
     if parts.len() != 3 {
@@ -314,6 +317,40 @@ fn looks_like_jwt(s: &str) -> bool {
             && p.chars()
                 .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
     })
+}
+
+fn list_paths(root: &Value) -> Vec<String> {
+    let mut out = Vec::new();
+    fn walk(node: &Value, path: &str, out: &mut Vec<String>) {
+        match node {
+            Value::Object(map) => {
+                if !path.is_empty() {
+                    out.push(path.into());
+                }
+                for (k, v) in map {
+                    let child = if path.is_empty() {
+                        k.clone()
+                    } else {
+                        format!("{path}.{k}")
+                    };
+                    walk(v, &child, out);
+                }
+            }
+            Value::Array(items) => {
+                for (idx, v) in items.iter().enumerate() {
+                    let child = format!("{path}[{idx}]");
+                    walk(v, &child, out);
+                }
+            }
+            _ => {
+                if !path.is_empty() {
+                    out.push(path.into());
+                }
+            }
+        }
+    }
+    walk(root, "", &mut out);
+    out
 }
 
 fn print_jwt_report(label: &str, items: &[FoundJwt]) {
@@ -350,9 +387,7 @@ fn jwt_metadata(token: &str) -> (Option<String>, Vec<String>) {
     (alg, claims)
 }
 
-struct ConnectError {
-    code: Option<u16>,
-}
+struct ConnectError;
 
 fn connect_ws(
     token: &str,
@@ -376,18 +411,7 @@ fn connect_ws(
         .insert("Origin", "https://otter.ai".parse().unwrap());
     match tungstenite::client::connect(req) {
         Ok((sock, resp)) => Ok((sock, resp.status().as_u16())),
-        Err(err) => {
-            // Try to extract an HTTP status when available
-            let mut code = None;
-            match err {
-                tungstenite::Error::Http(resp) => {
-                    code = Some(resp.status().as_u16());
-                }
-                tungstenite::Error::ConnectionClosed => code = Some(0),
-                _ => {}
-            }
-            Err(ConnectError { code })
-        }
+        Err(_err) => Err(ConnectError),
     }
 }
 
