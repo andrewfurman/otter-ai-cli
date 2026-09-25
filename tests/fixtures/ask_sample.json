@@ -1,0 +1,83 @@
+{
+  "blocks": [
+    {
+      "type": "text_block",
+      "children": [
+        { "type": "text", "text": "Latest with Alex Example:" }
+      ]
+    },
+    {
+      "type": "list_block",
+      "children": [
+        {
+          "type": "list_item",
+          "children": [
+            {
+              "type": "text_block",
+              "children": [
+                { "type": "text", "text": "First Meeting" }
+              ]
+            },
+            { "type": "text", "text": " [" },
+            {
+              "type": "speech",
+              "text": "First Meeting",
+              "otid": "TESTOTID1",
+              "speech_id": "42",
+              "start_time": "123"
+            },
+            { "type": "text", "text": "]" },
+            {
+              "type": "text_block",
+              "children": [
+                { "type": "text", "text": "  - Date: Thu Sep 24, 2026" }
+              ]
+            },
+            {
+              "type": "text_block",
+              "children": [
+                { "type": "text", "text": "  - Participants: Alex Example , Bob Example" }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "list_item",
+          "children": [
+            {
+              "type": "text_block",
+              "children": [
+                { "type": "text", "text": "Second Meeting" }
+              ]
+            },
+            {
+              "type": "speech",
+              "text": "Second Meeting",
+              "otid": "TESTOTID1",
+              "speech_id": "42",
+              "start_time": "123"
+            },
+            {
+              "type": "text_block",
+              "children": [
+                { "type": "text", "text": "  - Date: Thu Sep 10, 2026" }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "list_item",
+          "children": [
+            {
+              "type": "text_block",
+              "children": [
+                { "type": "text", "text": "--" }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
+
