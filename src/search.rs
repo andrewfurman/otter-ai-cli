@@ -9,7 +9,7 @@ use crate::util::{
 };
 
 const DEFAULT_LIMIT: u32 = 500;
-const WIDEN_DAYS_FOR_TITLE_TIME: i64 = 7; // widen server window to catch imported recordings
+const WIDEN_DAYS_FOR_TITLE_TIME: i64 = 14; // extend end to catch imported recordings
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum SortMode {
@@ -32,28 +32,24 @@ pub fn run(
     if days.is_some() && (from.is_some() || to.is_some()) {
         fail("--days cannot be combined with --from/--to");
     }
-    let (begin, end) = match (from, to, days) {
-        (Some(from), to, None) => {
-            let begin = start_of_day_et(&from)
-                .unwrap_or_else(|| invalid_date(&from, "--from must be YYYY-MM-DD"));
-            let end = to
-                .as_deref()
-                .map(start_of_day_exclusive_et)
-                .transpose()
-                .unwrap_or_else(|e| e);
-            let end = end.unwrap_or_else(|| start_of_day_exclusive_et(&today_yyyy_mm_dd()).unwrap());
-            if end <= begin {
-                fail("--to must not be earlier than --from");
-            }
-            (Some(begin), Some(end))
+    if to.is_some() && from.is_none() {
+        fail("--to requires --from");
+    }
+    let (begin, end) = if let Some(days) = days {
+        last_n_calendar_days_window(days)
+    } else if let Some(from) = from {
+        let begin = start_of_day_et(&from)
+            .unwrap_or_else(|| invalid_date(&from, "--from must be YYYY-MM-DD"));
+        let end = to
+            .as_deref()
+            .map(start_of_day_exclusive_et)
+            .unwrap_or_else(|| start_of_day_exclusive_et(&today_yyyy_mm_dd()));
+        if end <= begin {
+            fail("--to must not be earlier than --from");
         }
-        (None, None, Some(days)) => last_n_calendar_days_window(days),
-        (None, None, None) => (None, None),
-        (None, Some(_), None) => fail("--to requires --from"),
-        (Some(_), None, None) => unreachable!(), // handled above
-        (Some(_), _, Some(_)) | (None, Some(_), Some(_)) | (Some(_), Some(_), Some(_)) => {
-            unreachable!()
-        }
+        (Some(begin), Some(end))
+    } else {
+        (None, None)
     };
     let limit = limit.unwrap_or(DEFAULT_LIMIT);
     let relevance = matches!(sort, SortMode::Relevant);
@@ -85,12 +81,7 @@ pub fn run(
             ));
             if result.ok() && truthy(&result.data["hits"]) {
                 let mut hits = result.data["hits"].as_array().cloned().unwrap_or_default();
-                if let (Some(user_begin), Some(user_end)) = (Some(begin), Some(end)) {
-                    hits = hits
-                        .into_iter()
-                        .filter(|hit| within_user_window(hit, user_begin, user_end))
-                        .collect();
-                }
+                hits = apply_user_window_filter(hits, begin, end);
                 return output_hits(hits, as_json);
             }
         }
@@ -114,7 +105,11 @@ pub fn run(
         if !result.ok() {
             fail(format!("Search failed: {}", result_repr(&result)));
         }
-        hits = Some(result.data["hits"].as_array().cloned().unwrap_or_default());
+        let mut list = result.data["hits"].as_array().cloned().unwrap_or_default();
+        if let (Some(b), Some(e)) = (begin, end) {
+            list = apply_user_window_filter(list, b, e);
+        }
+        hits = Some(list);
     } else {
         // Multiple speakers: intersect conversations containing ALL given speakers.
         for speaker in speakers.iter() {
@@ -131,12 +126,8 @@ pub fn run(
                 fail(format!("Search failed: {}", result_repr(&result)));
             }
             let mut speaker_hits = result.data["hits"].as_array().cloned().unwrap_or_default();
-            // Apply user window filtering (uploads vs embedded title time).
-            if let (Some(user_begin), Some(user_end)) = (begin, end) {
-                speaker_hits = speaker_hits
-                    .into_iter()
-                    .filter(|hit| within_user_window(hit, user_begin, user_end))
-                    .collect();
+            if let (Some(b), Some(e)) = (begin, end) {
+                speaker_hits = apply_user_window_filter(speaker_hits, b, e);
             }
             hits = Some(match (hits.take(), Some(speaker_hits)) {
                 (None, Some(h)) => h,
@@ -160,11 +151,17 @@ pub fn run(
         });
         hits.reverse(); // most recent first
     } else {
-        hits.sort_by(|a, b| {
-            let sa = a.get("_score").and_then(Value::as_f64).unwrap_or(0.0);
-            let sb = b.get("_score").and_then(Value::as_f64).unwrap_or(0.0);
-            sb.partial_cmp(&sa).unwrap_or(std::cmp::Ordering::Equal)
-        });
+        // Only sort by score if any hit has a score; otherwise preserve server order.
+        let any_score = hits
+            .iter()
+            .any(|h| h.get("_score").and_then(Value::as_f64).is_some());
+        if any_score {
+            hits.sort_by(|a, b| {
+                let sa = a.get("_score").and_then(Value::as_f64).unwrap_or(0.0);
+                let sb = b.get("_score").and_then(Value::as_f64).unwrap_or(0.0);
+                sb.partial_cmp(&sa).unwrap_or(std::cmp::Ordering::Equal)
+            });
+        }
     }
     if hits.len() > limit as usize {
         hits.truncate(limit as usize);
@@ -172,7 +169,16 @@ pub fn run(
     output_hits(hits, as_json);
 }
 
+fn add_recorded_at(hit: &mut Value) {
+    let start = hit.get("start_time").and_then(Value::as_i64).unwrap_or(0);
+    let recorded = parse_title_time_et(&value_str(&hit["title"])).unwrap_or(start);
+    hit["recorded_at"] = json!(recorded);
+}
+
 fn output_hits(mut hits: Vec<Value>, as_json: bool) {
+    for h in &mut hits {
+        add_recorded_at(h);
+    }
     if as_json {
         print_json(&json!({ "hits": hits }));
         return;
@@ -185,7 +191,8 @@ fn output_hits(mut hits: Vec<Value>, as_json: bool) {
     for hit in &mut hits {
         let title = value_str(&hit["title"]);
         let otid = value_str(&hit["speech_otid"]);
-        let date = format_timestamp(&hit["start_time"]);
+        // Prefer parsed recording time for display.
+        let date = format_timestamp(&hit["recorded_at"]);
         let duration = format_duration(&hit["duration"]);
         let snippet = match_snippet(hit);
         let mut line = format!("{date}  {duration:>6}  {title}  ({otid})");
@@ -203,24 +210,19 @@ fn date_only_fallback_list(
     as_json: bool,
     limit: u32,
 ) {
+    eprintln!("Note: advanced_search with date-only failed; falling back to listing and local filtering.");
     // Collect listing pages starting from server_begin (cutoff) and then apply end filter.
     let cutoff = begin.map(|b| b as f64);
     let listing = collect_pages(true, cutoff, 1000, |cursor| {
         client.get_speeches_page("0", 100, "owned", cursor)
     });
-    let mut speeches = listing.data["speeches"].as_array().cloned().unwrap_or_default();
-    if let Some(end) = end {
-        speeches.retain(|s| {
-            s.get("created_at")
-                .and_then(Value::as_i64)
-                .is_some_and(|t| t < end)
-        });
-    }
-    if speeches.len() > limit as usize {
-        speeches.truncate(limit as usize);
-    }
-    // Map to hits-like shape.
-    let hits: Vec<Value> = speeches
+    let speeches = listing
+        .data["speeches"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    // Map to hits-like shape and apply user-aware window filtering (title time or upload time).
+    let mut hits: Vec<Value> = speeches
         .into_iter()
         .map(|s| {
             json!({
@@ -232,6 +234,12 @@ fn date_only_fallback_list(
             })
         })
         .collect();
+    if let (Some(b), Some(e)) = (begin, end) {
+        hits = apply_user_window_filter(hits, b, e);
+    }
+    if hits.len() > limit as usize {
+        hits.truncate(limit as usize);
+    }
     output_hits(hits, as_json);
 }
 
@@ -245,7 +253,7 @@ fn start_of_day_et(date: &str) -> Option<i64> {
     }
 }
 
-fn start_of_day_exclusive_et(date: &str) -> Result<i64, !> {
+fn start_of_day_exclusive_et(date: &str) -> i64 {
     let (year, month, day) = split_ymd(date).unwrap_or_else(|| invalid_date(date, "invalid date"));
     let next = chrono::NaiveDate::from_ymd_opt(year, month, day)
         .unwrap()
@@ -254,10 +262,8 @@ fn start_of_day_exclusive_et(date: &str) -> Result<i64, !> {
     match chrono_tz::America::New_York
         .with_ymd_and_hms(next.year(), next.month(), next.day(), 0, 0, 0)
     {
-        chrono::LocalResult::Single(dt) | chrono::LocalResult::Ambiguous(dt, _) => {
-            Ok(dt.timestamp())
-        }
-        _ => Ok(0),
+        chrono::LocalResult::Single(dt) | chrono::LocalResult::Ambiguous(dt, _) => dt.timestamp(),
+        _ => 0,
     }
 }
 
@@ -314,7 +320,7 @@ fn last_n_calendar_days_window(days: u32) -> (Option<i64>, Option<i64>) {
 }
 
 fn widen_server_window(begin: Option<i64>, end: Option<i64>) -> (Option<i64>, Option<i64>) {
-    let begin = begin.map(|b| b.saturating_sub(WIDEN_DAYS_FOR_TITLE_TIME * 86400));
+    let end = end.map(|e| e.saturating_add(WIDEN_DAYS_FOR_TITLE_TIME * 86400));
     (begin, end)
 }
 
@@ -327,6 +333,12 @@ fn within_user_window(hit: &Value, user_begin: i64, user_end: i64) -> bool {
         return (user_begin..user_end).contains(&parsed);
     }
     false
+}
+
+fn apply_user_window_filter(hits: Vec<Value>, user_begin: i64, user_end: i64) -> Vec<Value> {
+    hits.into_iter()
+        .filter(|hit| within_user_window(hit, user_begin, user_end))
+        .collect()
 }
 
 fn parse_title_time_et(title: &str) -> Option<i64> {
@@ -467,12 +479,54 @@ mod tests {
     fn inclusive_end_date_is_next_day_midnight_et_and_dst_boundaries() {
         // 2024-03-10 is DST start date; midnight exclusive end is 2024-03-11 00:00 ET.
         let begin = start_of_day_et("2024-03-10").unwrap();
-        let end = start_of_day_exclusive_et("2024-03-10").unwrap();
+        let end = start_of_day_exclusive_et("2024-03-10");
         assert!(end > begin);
         // 2024-11-03 is DST end date; still compute midnight next day in ET.
         let begin = start_of_day_et("2024-11-03").unwrap();
-        let end = start_of_day_exclusive_et("2024-11-03").unwrap();
+        let end = start_of_day_exclusive_et("2024-11-03");
         assert!(end > begin);
+    }
+
+    #[test]
+    fn widen_server_extends_end_only() {
+        let begin = Some(1_700_000_000);
+        let end = Some(1_700_086_400); // +1 day
+        let (wb, we) = widen_server_window(begin, end);
+        assert_eq!(wb, begin);
+        assert!(we.unwrap() > end.unwrap());
+    }
+
+    #[test]
+    fn recorded_time_used_for_display_and_json() {
+        let mut hit = json!({
+            "title": "Recording on Mon Sep 21st 2026 @ 7:37am ET",
+            "speech_otid": "otid",
+            "start_time": 0,
+            "duration": 60
+        });
+        add_recorded_at(&mut hit);
+        let ts = hit["recorded_at"].as_i64().unwrap();
+        let dt = chrono_tz::America::New_York.timestamp_opt(ts, 0).single().unwrap();
+        assert_eq!((dt.year(), dt.month(), dt.day()), (2026, 9, 21));
+    }
+
+    #[test]
+    fn window_filter_honors_title_time_when_upload_outside() {
+        let begin = start_of_day_et("2026-09-21").unwrap();
+        let end = start_of_day_exclusive_et("2026-09-24");
+        let inside = json!({
+            "title": "Talk on Tue Sep 22nd 2026 @ 10:00am ET",
+            "speech_otid": "A",
+            "start_time": begin - 10_000, // upload earlier
+        });
+        let outside = json!({
+            "title": "Talk",
+            "speech_otid": "B",
+            "start_time": end + 10_000, // upload later, no title time
+        });
+        let filtered = apply_user_window_filter(vec![inside, outside], begin, end);
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0]["speech_otid"], "A");
     }
 }
 

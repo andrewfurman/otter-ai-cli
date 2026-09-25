@@ -8,6 +8,32 @@ use serde_json::{json, Map, Value};
 const API_BASE_URL: &str = "https://otter.ai/forward/api/v1/";
 const S3_UPLOAD_URL: &str = "https://s3.us-west-2.amazonaws.com/speech-upload-prod";
 
+/// Centralized query parameter names for archive-level advanced_search.
+/// Adjust these when live-captured names change.
+#[derive(Clone, Copy)]
+pub struct AdvancedSearchParamNames {
+    pub size: &'static str,
+    pub session_id: &'static str,
+    pub relevance: &'static str,
+    pub appid: &'static str,
+    pub query: &'static str,
+    pub speaker: &'static str,
+    pub begin_date: &'static str,
+    pub end_date: &'static str,
+}
+
+pub const DEFAULT_ADVANCED_SEARCH_PARAMS: AdvancedSearchParamNames = AdvancedSearchParamNames {
+    size: "size",
+    session_id: "session_id",
+    relevance: "relevance",
+    appid: "appid",
+    // Using 'query' (not 'q') until the live capture confirms exact names.
+    query: "query",
+    speaker: "speaker",
+    begin_date: "begin_date",
+    end_date: "end_date",
+};
+
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     #[error("http error: {0}")]
@@ -316,28 +342,51 @@ impl Client {
         relevance: bool,
         session_id: &str,
     ) -> reqwest::blocking::RequestBuilder {
+        self.advanced_search_request_with_params(
+            q,
+            speaker,
+            begin_date,
+            end_date,
+            size,
+            relevance,
+            session_id,
+            DEFAULT_ADVANCED_SEARCH_PARAMS,
+        )
+    }
+
+    pub fn advanced_search_request_with_params(
+        &self,
+        q: Option<&str>,
+        speaker: Option<&str>,
+        begin_date: Option<i64>,
+        end_date: Option<i64>,
+        size: u32,
+        relevance: bool,
+        session_id: &str,
+        names: AdvancedSearchParamNames,
+    ) -> reqwest::blocking::RequestBuilder {
         let mut request = self
             .http
             .get(format!("{API_BASE_URL}advanced_search"))
-            .query(&[("size", &size.to_string())])
-            .query(&[("session_id", session_id)])
-            .query(&[("relevance", if relevance { "true" } else { "false" })])
-            .query(&[("appid", "otter-web")]);
+            .query(&[(names.size, &size.to_string())])
+            .query(&[(names.session_id, session_id)])
+            .query(&[(names.relevance, if relevance { "true" } else { "false" })])
+            .query(&[(names.appid, "otter-web")]);
         if let Some(q) = q {
             if !q.trim().is_empty() {
-                request = request.query(&[("q", q)]);
+                request = request.query(&[(names.query, q)]);
             }
         }
         if let Some(speaker) = speaker {
             if !speaker.trim().is_empty() {
-                request = request.query(&[("speaker", speaker)]);
+                request = request.query(&[(names.speaker, speaker)]);
             }
         }
         if let Some(begin) = begin_date {
-            request = request.query(&[("begin_date", &begin.to_string())]);
+            request = request.query(&[(names.begin_date, &begin.to_string())]);
         }
         if let Some(end) = end_date {
-            request = request.query(&[("end_date", &end.to_string())]);
+            request = request.query(&[(names.end_date, &end.to_string())]);
         }
         request
     }
@@ -802,10 +851,11 @@ mod tests {
 
     #[test]
     fn advanced_search_request_builds_expected_query() {
+        use super::DEFAULT_ADVANCED_SEARCH_PARAMS as N;
         let client = super::Client::new().unwrap();
         let session = "cli-123";
         let request = client
-            .advanced_search_request(
+            .advanced_search_request_with_params(
                 Some("Disney"),
                 Some("Kate Furman"),
                 Some(1790000000),
@@ -813,6 +863,7 @@ mod tests {
                 500,
                 true,
                 session,
+                N,
             )
             .build()
             .unwrap();
@@ -825,7 +876,7 @@ mod tests {
             ("appid", "otter-web"),
             ("begin_date", "1790000000"),
             ("end_date", "1790100000"),
-            ("q", "Disney"),
+            ("query", "Disney"),
             ("relevance", "true"),
             ("session_id", session),
             ("size", "500"),
