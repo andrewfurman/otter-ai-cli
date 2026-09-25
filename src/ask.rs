@@ -639,19 +639,83 @@ fn render_nodes(
                     }
                 }
                 "list_item" => {
-                    // Render the item's inline text first on one line
-                    let mut line = String::new();
+                    // Otter's real shape: each list_item contains multiple text_blocks.
+                    // - The first text_block is the bullet line content.
+                    // - Subsequent text_blocks begin with a literal "  - " marker; render each
+                    //   on its own indented sub-line with a normalized "- " prefix.
+                    // - Inline nodes like `speech` appear as siblings; keep them with the current group.
                     if let Some(children) = map.get("children") {
-                        collect_inline(children, &mut line, sources);
-                        let trimmed = line.trim_end();
-                        if !trimmed.is_empty() {
-                            out.push_str(&"  ".repeat(indent));
-                            out.push_str("- ");
-                            out.push_str(trimmed);
-                            out.push('\n');
+                        // Group contiguous inline content by top-level text_block boundaries.
+                        let mut groups: Vec<String> = Vec::new();
+                        let mut current: String = String::new();
+                        let push_current = |groups: &mut Vec<String>, current: &mut String| {
+                            let text = normalize_inline(current);
+                            if !text.is_empty() {
+                                groups.push(text);
+                            }
+                            current.clear();
+                        };
+
+                        if let Some(items) = children.as_array() {
+                            for item in items {
+                                let item_type =
+                                    item.get("type").and_then(Value::as_str).unwrap_or("");
+                                if item_type == "text_block" {
+                                    // Finish previous group.
+                                    push_current(&mut groups, &mut current);
+                                    // Collect this block's inline content.
+                                    if let Some(inline) = item.get("children") {
+                                        collect_inline(inline, &mut current, sources);
+                                    }
+                                    // Keep as current group (do not push yet) to allow following
+                                    // inline siblings (e.g., `speech` nodes) to join this line.
+                                    push_current(&mut groups, &mut current);
+                                } else if item_type == "list_block" || item_type == "list_item" {
+                                    // Rare nested list: finish current groups and render nested.
+                                    push_current(&mut groups, &mut current);
+                                    render_nodes(item, indent + 1, false, out, sources);
+                                } else {
+                                    // Inline sibling: append to current group.
+                                    collect_inline(item, &mut current, sources);
+                                }
+                            }
+                            // Push any trailing inline group
+                            push_current(&mut groups, &mut current);
                         }
-                        // Render any nested lists under this item with increased indent
-                        render_nested_lists(children, indent + 1, out, sources);
+
+                        // If the entire list_item is only hyphens (e.g., "--"), render a divider.
+                        let mut all_text = groups.join(" ");
+                        all_text.retain(|c| !c.is_whitespace());
+                        if !all_text.is_empty() && all_text.chars().all(|c| c == '-') {
+                            if !out.ends_with('\n') {
+                                out.push('\n');
+                            }
+                            out.push_str(&"  ".repeat(indent));
+                            out.push_str("---\n");
+                            return;
+                        }
+
+                        if !groups.is_empty() {
+                            // Main bullet line
+                            let first = groups[0].as_str();
+                            if !first.is_empty() {
+                                out.push_str(&"  ".repeat(indent));
+                                out.push_str("- ");
+                                out.push_str(first);
+                                out.push('\n');
+                            }
+                            // Sub-lines: strip any leading literal "  - " marker and re-indent.
+                            for sub in groups.iter().skip(1) {
+                                let mut subline = strip_leading_marker(sub);
+                                subline = normalize_inline(&subline);
+                                if !subline.is_empty() {
+                                    out.push_str(&"  ".repeat(indent + 1));
+                                    out.push_str("- ");
+                                    out.push_str(&subline);
+                                    out.push('\n');
+                                }
+                            }
+                        }
                     }
                 }
                 "divider" | "hr" => {
@@ -676,7 +740,7 @@ fn render_nodes(
                             }
                             out.push('\n');
                         }
-                        out.push_str(trimmed);
+                        out.push_str(&normalize_inline(trimmed));
                         out.push('\n');
                     }
                 }
@@ -699,7 +763,7 @@ fn render_nodes(
                             }
                             out.push('\n');
                         }
-                        out.push_str(trimmed);
+                        out.push_str(&normalize_inline(trimmed));
                         out.push('\n');
                     }
                 }
@@ -758,30 +822,43 @@ fn render_nodes(
     }
 }
 
-fn render_nested_lists(
-    node: &Value,
-    indent: usize,
-    out: &mut String,
-    sources: &mut Vec<SourceInfo>,
-) {
-    match node {
-        Value::Array(items) => {
-            for item in items {
-                render_nested_lists(item, indent, out, sources);
+// Normalize inline text: collapse runs of spaces, remove space before commas, trim end.
+fn normalize_inline(s: &str) -> String {
+    // Collapse multiple spaces into one (leave other whitespace alone).
+    let mut out = String::with_capacity(s.len());
+    let mut last_space = false;
+    for ch in s.chars() {
+        if ch == ' ' {
+            if !last_space {
+                out.push(' ');
+                last_space = true;
             }
+        } else {
+            out.push(ch);
+            last_space = false;
         }
-        Value::Object(map) => {
-            let node_type = map.get("type").and_then(Value::as_str).unwrap_or("");
-            if node_type == "list_block" || node_type == "list" {
-                render_nodes(&Value::Object(map.clone()), indent, false, out, sources);
-                return;
-            }
-            if let Some(children) = map.get("children") {
-                render_nested_lists(children, indent, out, sources);
-            }
-        }
-        _ => {}
     }
+    // Remove stray space before commas.
+    let mut collapsed = String::with_capacity(out.len());
+    let mut chars = out.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == ' ' && matches!(chars.peek(), Some(',')) {
+            // skip this space
+            continue;
+        }
+        collapsed.push(c);
+    }
+    collapsed.trim_end().to_string()
+}
+
+// Strip a leading literal list marker such as "- " or "  - " from a line.
+fn strip_leading_marker(s: &str) -> String {
+    let mut t = s.trim_start();
+    if t.starts_with("- ") {
+        t = &t[2..];
+        t = t.trim_start();
+    }
+    t.to_string()
 }
 
 fn collect_inline(node: &Value, out: &mut String, sources: &mut Vec<SourceInfo>) {
@@ -822,6 +899,19 @@ fn collect_inline(node: &Value, out: &mut String, sources: &mut Vec<SourceInfo>)
                         collect_inline(children, &mut para, sources);
                     }
                     if !para.is_empty() {
+                        // If the last appended content ended with a citation "]", and this text
+                        // node begins with a closing bracket, drop the extraneous bracket.
+                        if out.ends_with(']') {
+                            let trimmed = para.trim_start();
+                            if trimmed.starts_with(']') {
+                                // remove the leading bracket and any extra leading whitespace
+                                let mut chars = trimmed.chars();
+                                // skip the first ']' char
+                                chars.next();
+                                let remainder: String = chars.collect();
+                                para = remainder.trim_start().to_string();
+                            }
+                        }
                         if !out.is_empty() && !out.ends_with(' ') {
                             out.push(' ');
                         }
@@ -834,6 +924,8 @@ fn collect_inline(node: &Value, out: &mut String, sources: &mut Vec<SourceInfo>)
                     }
                 }
                 "speech" => {
+                    // Drop any preceding " [" bracket from sibling text nodes.
+                    strip_trailing_open_bracket(out);
                     let title = map
                         .get("text")
                         .and_then(Value::as_str)
@@ -877,6 +969,19 @@ fn collect_inline(node: &Value, out: &mut String, sources: &mut Vec<SourceInfo>)
             }
         }
         _ => {}
+    }
+}
+
+fn strip_trailing_open_bracket(out: &mut String) {
+    // Remove any trailing spaces, then a single '[' (and surrounding spaces) if present.
+    while out.ends_with(' ') {
+        out.pop();
+    }
+    if out.ends_with('[') {
+        out.pop();
+        while out.ends_with(' ') {
+            out.pop();
+        }
     }
 }
 
@@ -986,16 +1091,19 @@ mod tests {
 
     #[test]
     fn render_fixture_lists_and_sources() {
-        let value: Value = serde_json::from_str(include_str!("../tests/fixtures/ask_sample.json"))
-            .unwrap_or_else(|_| {
-                // Fallback to anonymized file if renamed only
-                serde_json::from_str(include_str!("../tests/fixtures/ask_emily.json")).unwrap()
-            });
+        let value: Value =
+            serde_json::from_str(include_str!("../tests/fixtures/ask_sample.json")).unwrap();
         let blocks = &value["blocks"];
         let mut sources = Vec::new();
         let text = render_blocks(blocks, &mut sources);
-        assert!(text.contains("- First Meeting"));
-        assert!(text.contains("- Second Meeting"));
+        // Bullet main lines
+        assert!(text.contains("- First Meeting [TESTOTID1]"));
+        assert!(text.contains("- Second Meeting [TESTOTID1]"));
+        // Sub-lines begin on their own lines with consistent indentation and no stray spaces
+        assert!(text.contains("\n  - Date: Thu Sep 24, 2026"));
+        assert!(text.contains("\n  - Participants: Alex Example, Bob Example"));
+        // No stray "- --" lines; divider rendered as --- or skipped
+        assert!(!text.contains("- --"));
         assert_eq!(sources.len(), 1);
         assert_eq!(sources[0].otid, "TESTOTID1");
     }
