@@ -473,6 +473,39 @@ impl Client {
         handle_acknowledgement(response, "set_transcript_speaker")
     }
 
+    /// Clear a speaker tag on a specific transcript segment.
+    /// This mirrors the browser's "Untag" action on a paragraph by calling
+    /// set_transcript_speaker with speaker_id=0.
+    pub fn clear_transcript_speaker(
+        &self,
+        speech_id: &str,
+        transcript_uuid: &str,
+    ) -> Result<ApiResponse, Error> {
+        let response = self
+            .clear_transcript_request(speech_id, transcript_uuid)?
+            .send()?;
+        handle_acknowledgement(response, "set_transcript_speaker")
+    }
+
+    /// Build the unset request for tests and callers.
+    fn clear_transcript_request(
+        &self,
+        speech_id: &str,
+        transcript_uuid: &str,
+    ) -> Result<reqwest::blocking::RequestBuilder, Error> {
+        Ok(self
+            .http
+            .get(format!("{API_BASE_URL}set_transcript_speaker"))
+            .query(&[
+                ("speech_otid", speech_id),
+                ("transcript_uuid", transcript_uuid),
+                ("speaker_id", "0"),
+                ("userid", self.userid()?),
+            ])
+            .header("referer", "https://otter.ai/")
+            .header("x-csrftoken", self.csrf_token()))
+    }
+
     pub fn list_groups(&self) -> Result<ApiResponse, Error> {
         let response = self
             .http
@@ -740,6 +773,36 @@ mod tests {
         assert_eq!(pairs.len(), 2);
         assert_eq!(pairs[0], ("otid".into(), "example-OTID".into()));
         assert_eq!(pairs[1], ("title".into(), title.into()));
+    }
+
+    #[test]
+    fn clear_transcript_request_targets_unset_endpoint_with_required_params() {
+        let mut client = super::Client::new().unwrap();
+        client.userid = Some("123".into());
+        let request = client
+            .clear_transcript_request("otid-abc", "uuid-xyz")
+            .unwrap()
+            .build()
+            .unwrap();
+        assert_eq!(request.method(), reqwest::Method::GET);
+        assert_eq!(
+            request.url().path(),
+            "/forward/api/v1/set_transcript_speaker"
+        );
+        let mut pairs: Vec<_> = request.url().query_pairs().collect();
+        pairs.sort_by(|a, b| a.0.cmp(&b.0));
+        assert_eq!(
+            pairs,
+            vec![
+                ("speaker_id".into(), "0".into()),
+                ("speech_otid".into(), "otid-abc".into()),
+                ("transcript_uuid".into(), "uuid-xyz".into()),
+                ("userid".into(), "123".into())
+            ]
+        );
+        let headers = request.headers();
+        assert_eq!(headers.get("referer").unwrap(), "https://otter.ai/");
+        assert!(headers.get("x-csrftoken").is_some());
     }
 
     #[test]
