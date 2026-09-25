@@ -4,6 +4,7 @@ mod batch_rename;
 mod folders;
 mod groups;
 mod pagination;
+mod search;
 mod speakers;
 mod speeches;
 mod util;
@@ -87,6 +88,44 @@ enum Command {
     /// Manage CLI configuration
     #[command(subcommand)]
     Config(ConfigCommand),
+    /// Search conversations across your archive (keyword/speakers/date window)
+    Search {
+        /// Optional keyword to search for
+        query: Option<String>,
+        /// Filter by speaker display name (repeatable)
+        #[arg(long, value_delimiter = ',', value_parser = clap::builder::NonEmptyStringValueParser::new())]
+        speaker: Vec<String>,
+        /// Search the full archive for speakers (bounded by --max-seconds)
+        #[arg(long)]
+        all: bool,
+        /// Print request/response debug info to stderr
+        #[arg(long)]
+        debug: bool,
+        /// Number of tries for unioning nondeterministic search (1-10, default 5)
+        #[arg(long, default_value_t = 5, value_parser = clap::value_parser!(u32).range(1..=10))]
+        tries: u32,
+        /// Overall wall-clock budget in seconds for multi-window/speaker searches (default 120)
+        #[arg(long, default_value_t = 120, value_parser = clap::value_parser!(u32).range(10..=600))]
+        max_seconds: u32,
+        /// Start date (YYYY-MM-DD) in America/New_York
+        #[arg(long, value_parser = clap::builder::NonEmptyStringValueParser::new())]
+        from: Option<String>,
+        /// End date (YYYY-MM-DD), inclusive; sent as next day's midnight ET
+        #[arg(long, value_parser = clap::builder::NonEmptyStringValueParser::new(), requires = "from")]
+        to: Option<String>,
+        /// Last N calendar days (conflicts with --from/--to)
+        #[arg(long, conflicts_with_all = ["from", "to"], value_parser = clap::value_parser!(u32).range(1..))]
+        days: Option<u32>,
+        /// Sort results by relevance (default) or most recent
+        #[arg(long, default_value = "relevant", value_parser = ["recent", "relevant"])]
+        sort: String,
+        /// Max results to return (default: 500)
+        #[arg(long, value_parser = clap::value_parser!(u32).range(1..))]
+        limit: Option<u32>,
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -389,6 +428,40 @@ fn main() {
             ConfigCommand::Show => auth::config_show(),
             ConfigCommand::Clear => auth::config_clear(),
         },
+        Command::Search {
+            query,
+            speaker,
+            all,
+            debug,
+            tries,
+            max_seconds,
+            from,
+            to,
+            days,
+            sort,
+            limit,
+            json,
+        } => {
+            let mode = if sort.eq_ignore_ascii_case("recent") {
+                search::SortMode::Recent
+            } else {
+                search::SortMode::Relevant
+            };
+            search::run(search::SearchOptions {
+                query,
+                speakers: speaker,
+                all,
+                from,
+                to,
+                days,
+                sort: mode,
+                limit,
+                as_json: json,
+                debug,
+                tries,
+                max_seconds,
+            })
+        }
     }
 }
 
@@ -493,6 +566,52 @@ mod tests {
                 assert_eq!(speaker.as_deref(), Some("42"));
             }
             _ => panic!("expected speeches search"),
+        }
+    }
+
+    #[test]
+    fn archive_search_parsing_accepts_speakers_dates_and_sort() {
+        let cli = Cli::try_parse_from([
+            "otter",
+            "search",
+            "Disney",
+            "--speaker",
+            "Kate",
+            "--speaker",
+            "Emily",
+            "--from",
+            "2026-09-21",
+            "--to",
+            "2026-09-24",
+            "--sort",
+            "recent",
+            "--limit",
+            "50",
+            "--json",
+        ])
+        .expect("search parse");
+        match cli.command {
+            Command::Search {
+                query,
+                speaker,
+                from,
+                to,
+                days,
+                sort,
+                limit,
+                json,
+                ..
+            } => {
+                assert_eq!(query.as_deref(), Some("Disney"));
+                assert_eq!(speaker, ["Kate", "Emily"]);
+                assert_eq!(from.as_deref(), Some("2026-09-21"));
+                assert_eq!(to.as_deref(), Some("2026-09-24"));
+                assert!(days.is_none());
+                assert_eq!(sort, "recent");
+                assert_eq!(limit, Some(50));
+                assert!(json);
+            }
+            _ => panic!("expected archive search"),
         }
     }
 }

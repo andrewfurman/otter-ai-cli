@@ -8,6 +8,45 @@ use serde_json::{json, Map, Value};
 const API_BASE_URL: &str = "https://otter.ai/forward/api/v1/";
 const S3_UPLOAD_URL: &str = "https://s3.us-west-2.amazonaws.com/speech-upload-prod";
 
+/// Centralized query parameter names for archive-level advanced_search.
+/// Adjust these when live-captured names change.
+#[derive(Clone, Copy)]
+pub struct AdvancedSearchParamNames {
+    pub size: &'static str,
+    pub session_id: &'static str,
+    pub relevance: &'static str,
+    pub appid: &'static str,
+    pub query: &'static str,
+    pub speakers: &'static str,
+    pub begin_date: &'static str,
+    pub end_date: &'static str,
+}
+
+/// Grouped options for archive-level advanced_search to avoid long parameter lists.
+#[derive(Clone, Copy)]
+pub struct AdvancedSearchOptions<'a> {
+    pub query: Option<&'a str>,
+    pub speaker: Option<&'a str>,
+    pub begin_date: Option<i64>,
+    pub end_date: Option<i64>,
+    pub size: u32,
+    pub relevance: bool,
+    pub session_id: &'a str,
+}
+
+pub const DEFAULT_ADVANCED_SEARCH_PARAMS: AdvancedSearchParamNames = AdvancedSearchParamNames {
+    size: "size",
+    session_id: "session_id",
+    relevance: "relevance",
+    appid: "appid",
+    // Confirmed from live capture: keyword is 'query' (not 'q').
+    query: "query",
+    // Confirmed from live capture: speaker filter is 'speakers' (plural).
+    speakers: "speakers",
+    begin_date: "begin_date",
+    end_date: "end_date",
+};
+
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     #[error("http error: {0}")]
@@ -168,6 +207,7 @@ impl Client {
         // The cookie store keeps the session + csrftoken cookies that every
         // later endpoint depends on, like requests.Session in the Python client.
         let http = reqwest::blocking::Client::builder()
+            .timeout(std::time::Duration::from_secs(30))
             .cookie_provider(jar.clone())
             .build()?;
         Ok(Self {
@@ -334,6 +374,61 @@ impl Client {
             .http
             .get(format!("{API_BASE_URL}set_speech_title"))
             .query(&[("otid", speech_id), ("title", title)]))
+    }
+
+    /// Build an archive-level advanced search request from grouped options.
+    /// Confirmed params from web capture: size, session_id, relevance, appid=otter-web.
+    /// Observed filters: query (keyword), speakers (display name), begin_date/end_date (epoch seconds).
+    /// When a speaker is None, the parameter is omitted; multiple speakers should be
+    /// issued as separate requests by the caller (server param is 'speakers').
+    pub fn advanced_search_request_with_params(
+        &self,
+        opts: AdvancedSearchOptions<'_>,
+        names: AdvancedSearchParamNames,
+    ) -> reqwest::blocking::RequestBuilder {
+        let mut request = self
+            .http
+            .get(format!("{API_BASE_URL}advanced_search"))
+            .query(&[(names.size, &opts.size.to_string())])
+            .query(&[(names.session_id, opts.session_id)])
+            .query(&[(
+                names.relevance,
+                if opts.relevance { "true" } else { "false" },
+            )])
+            .query(&[(names.appid, "otter-web")]);
+        if let Some(q) = opts.query {
+            if !q.trim().is_empty() {
+                request = request.query(&[(names.query, q)]);
+            }
+        }
+        if let Some(speaker) = opts.speaker {
+            if !speaker.trim().is_empty() {
+                request = request.query(&[(names.speakers, speaker)]);
+            }
+        }
+        if let Some(begin) = opts.begin_date {
+            request = request.query(&[(names.begin_date, &begin.to_string())]);
+        }
+        if let Some(end) = opts.end_date {
+            request = request.query(&[(names.end_date, &end.to_string())]);
+        }
+        request
+    }
+
+    /// Execute an archive-level advanced search request.
+    pub fn advanced_search_opts(
+        &self,
+        opts: AdvancedSearchOptions<'_>,
+    ) -> Result<ApiResponse, Error> {
+        let response = self
+            .advanced_search_request_with_params(opts, DEFAULT_ADVANCED_SEARCH_PARAMS)
+            .send()?;
+        handle_response(response)
+    }
+    /// Fetch the next page by absolute URL when the server supplies a `next` link.
+    pub fn advanced_search_next(&self, next_url: &str) -> Result<ApiResponse, Error> {
+        let response = self.http.get(next_url).send()?;
+        handle_response(response)
     }
 
     /// Search a speech via GET `advanced_search`.
@@ -876,6 +971,51 @@ mod tests {
     }
 
     #[test]
+    fn advanced_search_request_builds_expected_query() {
+        use super::{AdvancedSearchOptions as Opts, DEFAULT_ADVANCED_SEARCH_PARAMS as N};
+        let client = super::Client::new().unwrap();
+        // UUID v4-shaped fixture
+        let session = "123e4567-e89b-4d3a-a456-426614174000";
+        let request = client
+            .advanced_search_request_with_params(
+                Opts {
+                    query: Some("Disney"),
+                    speaker: Some("Kate Furman"),
+                    begin_date: Some(1790000000),
+                    end_date: Some(1790100000),
+                    size: 500,
+                    relevance: true,
+                    session_id: session,
+                },
+                N,
+            )
+            .build()
+            .unwrap();
+        assert_eq!(request.method(), reqwest::Method::GET);
+        assert_eq!(request.url().path(), "/forward/api/v1/advanced_search");
+        let mut pairs: Vec<_> = request.url().query_pairs().collect();
+        pairs.sort_by(|a, b| a.0.cmp(&b.0));
+        // Ensure confirmed and filter params are present; allow server to reorder
+        let expected = vec![
+            ("appid", "otter-web"),
+            ("begin_date", "1790000000"),
+            ("end_date", "1790100000"),
+            ("query", "Disney"),
+            ("relevance", "true"),
+            ("session_id", session),
+            ("size", "500"),
+            ("speakers", "Kate Furman"),
+        ];
+        for (key, value) in expected {
+            assert!(
+                pairs.contains(&(key.into(), value.into())),
+                "missing {key}={value} in {:?}",
+                pairs
+            );
+        }
+    }
+
+    #[test]
     fn clear_transcript_request_targets_unset_endpoint_with_required_params() {
         let mut client = super::Client::new().unwrap();
         client.userid = Some("123".into());
@@ -904,7 +1044,6 @@ mod tests {
         assert_eq!(headers.get("referer").unwrap(), "https://otter.ai/");
         assert!(headers.get("x-csrftoken").is_some());
     }
-
     #[test]
     fn retry_delays_accept_headers_json_and_http_dates() {
         let now = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1672531200);

@@ -23,6 +23,7 @@ Log in with your own Otter account, then list conversations:
 ```bash
 otter login
 otter speeches list --days 2
+otter search Disney --speaker "Kate Furman" --from 2026-09-21 --to 2026-09-24
 ```
 
 Most read commands take `--json` for scripts and agents; `speakers tag --json` also returns a batch result. `speeches list` and `speeches search` accept `--speaker` to filter by speaker name or id. `otter --help` and `otter help` show every command and rate-limit guidance. Use `otter <group> --help` or `otter help <group> <command>` for arguments and examples.
@@ -40,6 +41,7 @@ Use this only with an Otter account you are allowed to access, and follow [Otter
 | `otter login` | Authenticate and save credentials; prompts if username/password are omitted |
 | `otter logout` | Clear saved credentials |
 | `otter user` | Show the current account |
+| `otter search [QUERY]` | Search conversations by keyword, speaker(s), and/or date window |
 | `otter speeches list` | List conversations; `--days N` fetches its date window and `--all` fetches all pages |
 | `otter speeches get OTID` | Fetch a conversation and its transcript segments |
 | `otter speeches search QUERY OTID` | Search a transcript, optionally filtering by speaker |
@@ -63,6 +65,33 @@ Use this only with an Otter account you are allowed to access, and follow [Otter
 | `otter ask "QUESTION"` | Ask Otter's AI Chat across all your conversations; prints the answer (optionally `--json`, `--timeout SECS`, `--debug`) |
 
 Run any command with `--help` for all its flags. Help does not authenticate or contact Otter. The top-level help inventory is generated from the command definitions so new commands appear automatically.
+
+### Archive search
+
+`otter search` finds conversations by keyword, one or more speaker display names, and/or a calendar date window in America/New_York.
+
+```bash
+# Keyword only (relevance-sorted)
+otter search Disney
+# One or more speakers (intersection: conversations with ALL of them)
+otter search --speaker "Kate Furman" --speaker "Emily White"
+# Calendar window (inclusive): start of FROM through end of TO
+otter search --from 2026-09-21 --to 2026-09-24
+# Combine filters and change sort/limit
+otter search Disney --speaker "Kate Furman" --from 2026-09-21 --to 2026-09-24 --sort recent --limit 100
+# JSON output
+otter search --speaker "Kate Furman" --days 7 --json
+```
+
+Notes:
+
+- Dates are calendar days in US Eastern. `--to` is inclusive; the CLI sends the following day's midnight to the server.
+- Multiple `--speaker` flags intersect (ALL). This matches how we naturally read “with Kate and Emily.” Speaker-only searches (with or without dates) use the recordings list with exact full-name matching, and every `--speaker` must be present. With no dates, the CLI searches the last 90 days by default; `--all` searches the full archive, bounded by `--max-seconds` (default 120). Progress lines and budget warnings are printed to stderr.
+- Date-only searches try Otter's `advanced_search` with only a date window. If that fails, the CLI falls back to the existing `speeches list` path for that window and formats results similarly. This behavior is explicit in `--json` via a `hits` array either way.
+- Imported recordings: Otter's `start_time` is upload time, not when recorded. When a title ends with “… on Mon Sep 21st 2026 @ 7:37am ET”, the CLI parses that time and filters locally so date windows behave as expected, falling back to upload time when no recording time is present.
+- `--sort` is `relevant` (default) or `recent`. `--limit` caps displayed rows; `--json` returns structured results (`hits`).
+- Keyword searches use `advanced_search` with multiple tries (`--tries N`, default 5), spaced a few seconds apart, and union their results (deduplicated by OTID). They are best-effort because Otter's backend can return varying partial sets even for identical requests.
+- Date filters apply to the recording time parsed from the title (when present), falling back to upload time.
 
 `speeches list` defaults to one page (`--page-size 45`) with an incompleteness notice when more results may exist. `--days N` automatically follows pages until its creation-time window is covered; `--all` fetches the full archive, or the complete date window when combined with `--days`. Folder and source filters stay on every request; speaker filtering happens after collection. No matches on the default single page does not establish that no matching conversation exists.
 
