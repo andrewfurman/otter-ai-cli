@@ -25,6 +25,7 @@ pub struct SearchOptions {
     pub limit: Option<u32>,
     pub as_json: bool,
     pub debug: bool,
+    pub tries: u32,
 }
 
 pub fn run(options: SearchOptions) {
@@ -38,6 +39,7 @@ pub fn run(options: SearchOptions) {
         limit,
         as_json,
         debug,
+        tries,
     } = options;
     // Validate arguments before logging in.
     if days.is_some() && (from.is_some() || to.is_some()) {
@@ -76,7 +78,6 @@ pub fn run(options: SearchOptions) {
         .collect();
 
     let client = authenticated_client();
-    let session_id = crate::util::uuid_v4();
 
     // For searches with query/speakers, do not send an end_date; filter locally by recorded_at.
     // For date-only searches, attempt advanced_search with a begin (and possibly end) first.
@@ -98,7 +99,7 @@ pub fn run(options: SearchOptions) {
                 end_date: Some(end),
                 size: limit,
                 relevance,
-                session_id: &session_id,
+                session_id: &crate::util::uuid_v4(),
             }));
             if result.ok() && truthy(&result.data["hits"]) {
                 let mut hits = result.data["hits"].as_array().cloned().unwrap_or_default();
@@ -112,42 +113,82 @@ pub fn run(options: SearchOptions) {
 
     // Case 2: q and/or speaker filters.
     let mut hits: Option<Vec<Value>> = None;
-    if speakers.is_empty() {
-        // Single search
-        let (mut list, _meta) = fetch_all_hits(
+    if speakers.is_empty() && query.as_deref().is_some_and(|q| !q.trim().is_empty()) {
+        // Keyword-only: union several nondeterministic calls with fresh session ids.
+        let mut list = union_advanced_search_tries(
             &client,
-            SearchReqOpts {
+            MultiTryOpts {
                 query: query.as_deref(),
                 speaker: None,
                 begin_date: server_begin,
                 end_date: server_end,
                 size: limit,
                 relevance,
-                session_id: &session_id,
+                tries,
+                debug,
             },
-            debug,
         );
         if let (Some(b), Some(e)) = (begin, end) {
             list = apply_user_window_filter(list, b, e);
         }
         hits = Some(list);
+    } else if !speakers.is_empty() && query.as_deref().is_none_or(str::is_empty) {
+        // Speaker-only: prefer deterministic listing if speakers are present in listing payload.
+        if let Some(mut list) =
+            list_and_filter_by_speakers(&client, begin, end, &speakers, limit, debug)
+        {
+            if let (Some(b), Some(e)) = (begin, end) {
+                list = apply_user_window_filter(list, b, e);
+            }
+            hits = Some(list);
+        } else {
+            // Fallback: multi-try union with speakers=, then intersect across speakers.
+            for speaker in speakers.iter() {
+                let server_size = DEFAULT_LIMIT;
+                let mut speaker_hits = union_advanced_search_tries(
+                    &client,
+                    MultiTryOpts {
+                        query: None,
+                        speaker: Some(speaker.as_str()),
+                        begin_date: server_begin,
+                        end_date: server_end,
+                        size: server_size,
+                        relevance,
+                        tries,
+                        debug,
+                    },
+                );
+                if let (Some(b), Some(e)) = (begin, end) {
+                    speaker_hits = apply_user_window_filter(speaker_hits, b, e);
+                }
+                hits = Some(match (hits.take(), Some(speaker_hits)) {
+                    (None, Some(h)) => h,
+                    (Some(existing), Some(new)) => intersect_by_otid(existing, new),
+                    (Some(existing), None) => existing,
+                    (None, None) => Vec::new(),
+                });
+                if hits.as_ref().is_some_and(|h| h.is_empty()) {
+                    break;
+                }
+            }
+        }
     } else {
-        // Multiple speakers: intersect conversations containing ALL given speakers.
+        // Keyword + speaker(s): union several calls per speaker, then intersect conversations
+        // containing ALL given speakers.
         for speaker in speakers.iter() {
-            // For multi-speaker intersection, avoid passing user's limit to each server call.
             let server_size = DEFAULT_LIMIT;
-            let (mut speaker_hits, _meta) = fetch_all_hits(
+            let mut speaker_hits = union_advanced_search_tries(
                 &client,
-                SearchReqOpts {
+                MultiTryOpts {
                     query: query.as_deref(),
-                    speaker: Some(speaker),
+                    speaker: Some(speaker.as_str()),
                     begin_date: server_begin,
                     end_date: server_end,
                     size: server_size,
                     relevance,
-                    session_id: &session_id,
+                    tries,
+                    debug,
                 },
-                debug,
             );
             if let (Some(b), Some(e)) = (begin, end) {
                 speaker_hits = apply_user_window_filter(speaker_hits, b, e);
@@ -178,11 +219,11 @@ pub fn run(options: SearchOptions) {
         // Only sort by score if any hit has a score; otherwise preserve server order.
         let any_score = hits
             .iter()
-            .any(|h| h.get("_score").and_then(Value::as_f64).is_some());
+            .any(|h| h.get("score").and_then(Value::as_f64).is_some());
         if any_score {
             hits.sort_by(|a, b| {
-                let sa = a.get("_score").and_then(Value::as_f64).unwrap_or(0.0);
-                let sb = b.get("_score").and_then(Value::as_f64).unwrap_or(0.0);
+                let sa = a.get("score").and_then(Value::as_f64).unwrap_or(0.0);
+                let sb = b.get("score").and_then(Value::as_f64).unwrap_or(0.0);
                 sb.partial_cmp(&sa).unwrap_or(std::cmp::Ordering::Equal)
             });
         }
@@ -268,94 +309,198 @@ fn date_only_fallback_list(
     output_hits(hits, as_json);
 }
 
-fn fetch_all_hits(
-    client: &otter::Client,
-    opts: SearchReqOpts<'_>,
+struct MultiTryOpts<'a> {
+    query: Option<&'a str>,
+    speaker: Option<&'a str>,
+    begin_date: Option<i64>,
+    end_date: Option<i64>,
+    size: u32,
+    relevance: bool,
+    tries: u32,
     debug: bool,
-) -> (Vec<Value>, Value) {
-    use otter::client::DEFAULT_ADVANCED_SEARCH_PARAMS as NAMES;
-    // Build a URL for debug without consuming the sendable builder.
-    let first_url = client
-        .advanced_search_request_with_params(opts, NAMES)
-        .build()
-        .ok()
-        .map(|r| r.url().to_string())
-        .unwrap_or_else(|| "<unavailable>".to_string());
-    let mut result = api(client.advanced_search_opts(opts));
-    if debug {
-        debug_print(&first_url, &result);
-    }
-    let hits = result.data["hits"].as_array().cloned().unwrap_or_default();
-    let mut seen = std::collections::HashSet::new();
-    let mut uniq = Vec::with_capacity(hits.len());
-    for h in hits {
-        let id = value_str(&h["speech_otid"]);
-        if !id.is_empty() && seen.insert(id) {
-            uniq.push(h);
+}
+
+fn union_advanced_search_tries(client: &otter::Client, opts: MultiTryOpts<'_>) -> Vec<Value> {
+    use std::collections::HashMap;
+    use std::thread::sleep;
+    use std::time::Duration;
+    let tries = opts.tries.clamp(1, 10);
+    let mut by_otid: HashMap<String, Value> = HashMap::new();
+    let mut last_new = 0usize;
+    for attempt in 0..tries {
+        let session = crate::util::uuid_v4();
+        let req = SearchReqOpts {
+            query: opts.query,
+            speaker: opts.speaker,
+            begin_date: opts.begin_date,
+            end_date: opts.end_date,
+            size: opts.size,
+            relevance: opts.relevance,
+            session_id: &session,
+        };
+        let result = api(client.advanced_search_opts(req));
+        if opts.debug {
+            // URL is built only for debug display.
+            use otter::client::DEFAULT_ADVANCED_SEARCH_PARAMS as NAMES;
+            let built = client
+                .advanced_search_request_with_params(req, NAMES)
+                .build()
+                .ok()
+                .map(|r| r.url().to_string())
+                .unwrap_or_else(|| "<unavailable>".to_string());
+            debug_print(&built, &result);
         }
-    }
-    let mut data_snapshot = result.data.clone();
-    // Follow server-supplied next link, if any.
-    let mut page_count = 1usize;
-    while let Some(next) = extract_next_url(&result.data) {
-        let next_abs = absolutize_next(&next);
-        let page = api(client.advanced_search_next(&next_abs));
-        if debug {
-            debug_print(&next_abs, &page);
-        }
-        let more = page.data["hits"].as_array().cloned().unwrap_or_default();
-        for h in more {
-            let id = value_str(&h["speech_otid"]);
-            if !id.is_empty() && seen.insert(id.clone()) {
-                uniq.push(h);
+        let hits = result.data["hits"].as_array().cloned().unwrap_or_default();
+        let mut new_this_round = 0usize;
+        for hit in hits {
+            let otid = value_str(&hit["speech_otid"]);
+            if otid.is_empty() {
+                continue;
+            }
+            match by_otid.get_mut(&otid) {
+                Some(existing) => {
+                    if merge_hit(existing, &hit) {
+                        // merged additional snippets or better score; not counted as "new"
+                    }
+                }
+                None => {
+                    by_otid.insert(otid, hit);
+                    new_this_round += 1;
+                }
             }
         }
-        data_snapshot = page.data.clone();
-        result = page;
-        page_count += 1;
-        if page_count > 50 {
-            // Safety stop.
-            break;
+        if new_this_round == 0 {
+            if last_new == 0 {
+                break; // two consecutive rounds added nothing
+            }
+            last_new = 0;
+        } else {
+            last_new = new_this_round;
         }
-        // Stop early if a completion flag is present.
-        if result
-            .data
-            .get("has_more")
+        if attempt + 1 < tries {
+            sleep(Duration::from_millis(300));
+        }
+    }
+    by_otid.into_values().collect()
+}
+
+fn merge_hit(existing: &mut Value, new_hit: &Value) -> bool {
+    let mut changed = false;
+    // score: keep max
+    let es = existing
+        .get("score")
+        .and_then(Value::as_f64)
+        .unwrap_or(f64::MIN);
+    let ns = new_hit
+        .get("score")
+        .and_then(Value::as_f64)
+        .unwrap_or(f64::MIN);
+    if ns > es {
+        existing["score"] = json!(ns);
+        changed = true;
+    }
+    // matched_title: OR
+    let mt = existing
+        .get("matched_title")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+        || new_hit
+            .get("matched_title")
             .and_then(Value::as_bool)
-            .is_some_and(|b| !b)
-            || result
-                .data
-                .get("end_of_list")
-                .and_then(Value::as_bool)
-                .unwrap_or(false)
-            || result
-                .data
-                .get("complete")
-                .and_then(Value::as_bool)
-                .unwrap_or(false)
-        {
-            break;
+            .unwrap_or(false);
+    if mt {
+        existing["matched_title"] = json!(true);
+        changed = true;
+    }
+    // matched_transcripts: union by matched_transcript string when present
+    let mut seen: std::collections::HashSet<String> = existing["matched_transcripts"]
+        .as_array()
+        .unwrap_or(&vec![])
+        .iter()
+        .filter_map(|it| {
+            it.get("matched_transcript")
+                .and_then(Value::as_str)
+                .map(|s| s.to_string())
+        })
+        .collect();
+    let mut merged = existing["matched_transcripts"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    if let Some(additional) = new_hit["matched_transcripts"].as_array() {
+        for it in additional {
+            if let Some(text) = it.get("matched_transcript").and_then(Value::as_str) {
+                if seen.insert(text.to_string()) {
+                    merged.push(it.clone());
+                    changed = true;
+                }
+            } else {
+                // Could not key it; append if not already present as identical object
+                if !merged.contains(it) {
+                    merged.push(it.clone());
+                    changed = true;
+                }
+            }
         }
     }
-    (uniq, data_snapshot)
-}
-
-fn extract_next_url(data: &Value) -> Option<String> {
-    data.get("next")
-        .and_then(Value::as_str)
-        .map(|s| s.to_string())
-}
-
-fn absolutize_next(next: &str) -> String {
-    if next.starts_with("http://") || next.starts_with("https://") {
-        next.to_string()
-    } else if next.starts_with('/') {
-        format!("https://otter.ai{next}")
-    } else {
-        // Unexpected; return as-is.
-        next.to_string()
+    if changed {
+        existing["matched_transcripts"] = Value::Array(merged);
     }
+    changed
 }
+
+fn list_and_filter_by_speakers(
+    client: &otter::Client,
+    begin: Option<i64>,
+    end: Option<i64>,
+    speakers: &[String],
+    limit: u32,
+    _debug: bool,
+) -> Option<Vec<Value>> {
+    // Fetch listing pages (owned, all folders) starting from begin cutoff.
+    let cutoff = begin.map(|b| b as f64);
+    let listing = collect_pages(true, cutoff, 1000, |cursor| {
+        client.get_speeches_page("0", 100, "owned", cursor)
+    });
+    let speeches = listing.data["speeches"].as_array()?.clone();
+    // Check presence of speakers metadata.
+    let has_speakers = speeches.iter().any(|s| s.get("speakers").is_some());
+    if !has_speakers {
+        return None;
+    }
+    let wanted: Vec<String> = speakers.iter().map(|s| s.to_lowercase()).collect();
+    let mut hits: Vec<Value> = speeches
+        .into_iter()
+        .filter(|s| {
+            let names: std::collections::HashSet<String> = s["speakers"]
+                .as_array()
+                .unwrap_or(&vec![])
+                .iter()
+                .filter_map(|sp| sp.get("speaker_name").and_then(Value::as_str))
+                .map(|n| n.trim().to_lowercase())
+                .collect();
+            wanted.iter().all(|w| names.contains(w))
+        })
+        .map(|s| {
+            json!({
+                "speech_otid": s["otid"],
+                "title": s["title"],
+                "duration": s["duration"],
+                "start_time": s["created_at"],
+                "matched_transcripts": [],
+            })
+        })
+        .collect();
+    if let (Some(b), Some(e)) = (begin, end) {
+        hits = apply_user_window_filter(hits, b, e);
+    }
+    if hits.len() > limit as usize {
+        hits.truncate(limit as usize);
+    }
+    Some(hits)
+}
+
+// advanced_search does not provide pagination; multiple non-deterministic calls are unioned instead.
 
 fn debug_print(url: &str, result: &otter::ApiResponse) {
     let masked = mask_session(url);

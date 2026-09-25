@@ -83,6 +83,9 @@ enum Command {
         /// Print request/response debug info to stderr
         #[arg(long)]
         debug: bool,
+        /// Number of tries for unioning nondeterministic search (1-10, default 3)
+        #[arg(long, default_value_t = 3, value_parser = clap::value_parser!(u32).range(1..=10))]
+        tries: u32,
         /// Start date (YYYY-MM-DD) in America/New_York
         #[arg(long, value_parser = clap::builder::NonEmptyStringValueParser::new())]
         from: Option<String>,
@@ -402,6 +405,7 @@ fn main() {
             query,
             speaker,
             debug,
+            tries,
             from,
             to,
             days,
@@ -424,6 +428,7 @@ fn main() {
                 limit,
                 as_json: json,
                 debug,
+                tries,
             })
         }
     }
@@ -558,13 +563,13 @@ mod tests {
             Command::Search {
                 query,
                 speaker,
-                debug: _,
                 from,
                 to,
                 days,
                 sort,
                 limit,
                 json,
+                ..
             } => {
                 assert_eq!(query.as_deref(), Some("Disney"));
                 assert_eq!(speaker, ["Kate", "Emily"]);

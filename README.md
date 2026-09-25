@@ -89,6 +89,7 @@ Notes:
 - Date-only searches try Otter's `advanced_search` with only a date window. If that fails, the CLI falls back to the existing `speeches list` path for that window and formats results similarly. This behavior is explicit in `--json` via a `hits` array either way.
 - Imported recordings: Otter's `start_time` is upload time, not when recorded. When a title ends with “… on Mon Sep 21st 2026 @ 7:37am ET”, the CLI parses that time, widens the server window by a few days, and filters locally so date windows behave as expected.
 - `--sort` is `relevant` (default) or `recent`. `--limit` caps displayed rows; `--json` returns structured results (`hits`).
+- Otter's search backend can return varying partial results to identical requests. The CLI mitigates this by issuing several `advanced_search` calls per query (`--tries N`, default 3), a few hundred milliseconds apart, and unioning their results (deduplicated by OTID). Speaker-only searches prefer a deterministic listing-and-local-filter path when speaker names are present in the listing payload.
 
 `speeches list` defaults to one page (`--page-size 45`) with an incompleteness notice when more results may exist. `--days N` automatically follows pages until its creation-time window is covered; `--all` fetches the full archive, or the complete date window when combined with `--days`. Folder and source filters stay on every request; speaker filtering happens after collection. No matches on the default single page does not establish that no matching conversation exists.
 
