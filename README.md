@@ -60,6 +60,7 @@ Use this only with an Otter account you are allowed to access, and follow [Otter
 | `otter config show` | Show configuration status with the password masked |
 | `otter config clear` | Clear saved configuration |
 | `otter help [COMMAND]` | Show help, including nested commands such as `help speakers tag` |
+| `otter ask "QUESTION"` | Ask Otter's AI Chat across all your conversations; prints the answer (optionally `--json`, `--timeout SECS`, `--debug`) |
 
 Run any command with `--help` for all its flags. Help does not authenticate or contact Otter. The top-level help inventory is generated from the command definitions so new commands appear automatically.
 
@@ -81,6 +82,26 @@ Pass move OTIDs as separate arguments. The CLI removes duplicates and sends one 
 `speeches download --output PATH` writes to that **exact path**, including when it has no extension. For example, `--format mp3 --output interview.mp3` produces `interview.mp3`. Without `--output`, the filename is `OTID.<format>`, or `OTID.zip` for multiple comma-separated formats. Older versions treated `--output` as a stem and appended an extension; include the extension yourself when upgrading scripts that relied on that behavior.
 
 Uploads stream the audio file, and downloads stream into a temporary file beside the destination. A download replaces the destination only after the complete HTTP 200 export arrives. HTTP errors, partial responses, and interrupted transfers leave an existing destination unchanged. Temporary files are removed on handled failures. Export errors preserve server retry guidance, including non-JSON rate-limit responses.
+
+## Ask Otter's AI Chat
+
+Ask Otter's built-in AI Chat across all your conversations:
+
+```bash
+otter ask "What action items came up in my meetings this week?"
+otter ask "Summarize status updates from last week" --json --timeout 180
+```
+
+Behavior:
+
+- Opens the realtime websocket first, then sends the question; the answer streams over `wss://ws.aisense.com/api/v2/client/session_update`.
+- Renders the latest update (not concatenated deltas) and prints when the answer is complete; list items render as bullets.
+- Prints a `Sources:` section with cited conversation OTIDs when present in the answer.
+- `--json` returns `{question, answer_text, blocks, sources, thread_uuid, message_uuid}`.
+- Default timeout is 120 seconds (`--timeout` overrides).
+- Debugging: `--debug` prints which source provided the websocket token and the top-level JSON keys observed; no secrets or raw token values are printed. Token discovery checks `OTTERAI_WS_TOKEN`, then the login response, then `/user`.
+
+Chat history listing (`chat_sessions`) is not required for `ask` and is not included here.
 
 ## Rename recordings in one session
 

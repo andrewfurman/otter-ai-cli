@@ -1,3 +1,4 @@
+mod ask;
 mod auth;
 mod batch_rename;
 mod folders;
@@ -44,6 +45,20 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Ask Otter's AI Chat across all conversations
+    Ask {
+        /// Your question for Otter's AI Chat
+        question: String,
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+        /// Timeout in seconds (default: 120)
+        #[arg(long, default_value_t = 120, value_parser = clap::value_parser!(u64).range(1..))]
+        timeout: u64,
+        /// Debug token discovery (prints only source and key names, not secrets)
+        #[arg(long)]
+        debug: bool,
+    },
     /// Authenticate with Otter.ai and save credentials
     Login {
         /// Otter.ai username (email)
@@ -292,6 +307,12 @@ fn main() {
     let matches = cli_command().get_matches();
     let cli = Cli::from_arg_matches(&matches).unwrap_or_else(|error| error.exit());
     match cli.command {
+        Command::Ask {
+            question,
+            json,
+            timeout,
+            debug,
+        } => ask::ask(question, json, timeout, debug),
         Command::Login { username, password } => auth::login(username, password),
         Command::Logout => auth::logout(),
         Command::User => auth::user(),
