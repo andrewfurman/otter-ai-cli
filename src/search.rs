@@ -216,15 +216,20 @@ pub fn run(options: SearchOptions) {
         });
         hits.reverse(); // most recent first
     } else {
-        // Only sort by score if any hit has a score; otherwise preserve server order.
-        let any_score = hits
-            .iter()
-            .any(|h| h.get("score").and_then(Value::as_f64).is_some());
+        // Deterministic: sort by score desc (accept `score` or `_score`), then recorded_at desc.
+        let any_score = hits.iter().any(|h| score_of(h).is_some());
         if any_score {
             hits.sort_by(|a, b| {
-                let sa = a.get("score").and_then(Value::as_f64).unwrap_or(0.0);
-                let sb = b.get("score").and_then(Value::as_f64).unwrap_or(0.0);
-                sb.partial_cmp(&sa).unwrap_or(std::cmp::Ordering::Equal)
+                let sa = score_of(a).unwrap_or(f64::MIN);
+                let sb = score_of(b).unwrap_or(f64::MIN);
+                match sb.partial_cmp(&sa).unwrap_or(std::cmp::Ordering::Equal) {
+                    std::cmp::Ordering::Equal => {
+                        let ra = a.get("recorded_at").and_then(Value::as_i64).unwrap_or(0);
+                        let rb = b.get("recorded_at").and_then(Value::as_i64).unwrap_or(0);
+                        rb.cmp(&ra)
+                    }
+                    other => other,
+                }
             });
         }
     }
@@ -238,6 +243,12 @@ fn add_recorded_at(hit: &mut Value) {
     let start = hit.get("start_time").and_then(Value::as_i64).unwrap_or(0);
     let recorded = parse_title_time_et(&value_str(&hit["title"])).unwrap_or(start);
     hit["recorded_at"] = json!(recorded);
+}
+
+fn score_of(hit: &Value) -> Option<f64> {
+    hit.get("score")
+        .and_then(Value::as_f64)
+        .or_else(|| hit.get("_score").and_then(Value::as_f64))
 }
 
 fn output_hits(mut hits: Vec<Value>, as_json: bool) {
@@ -326,7 +337,8 @@ fn union_advanced_search_tries(client: &otter::Client, opts: MultiTryOpts<'_>) -
     use std::time::Duration;
     let tries = opts.tries.clamp(1, 10);
     let mut by_otid: HashMap<String, Value> = HashMap::new();
-    let mut last_new = 0usize;
+    let mut non_empty_count = 0usize;
+    let mut consecutive_no_new = 0usize;
     for attempt in 0..tries {
         let session = crate::util::uuid_v4();
         let req = SearchReqOpts {
@@ -339,7 +351,7 @@ fn union_advanced_search_tries(client: &otter::Client, opts: MultiTryOpts<'_>) -
             session_id: &session,
         };
         let result = api(client.advanced_search_opts(req));
-        if opts.debug {
+        if should_log_progress(opts.debug) {
             // URL is built only for debug display.
             use otter::client::DEFAULT_ADVANCED_SEARCH_PARAMS as NAMES;
             let built = client
@@ -369,16 +381,30 @@ fn union_advanced_search_tries(client: &otter::Client, opts: MultiTryOpts<'_>) -
                 }
             }
         }
-        if new_this_round == 0 {
-            if last_new == 0 {
-                break; // two consecutive rounds added nothing
+        let round_hits = result.data["hits"].as_array().map_or(0, Vec::len);
+        if should_log_progress(opts.debug) {
+            eprintln!(
+                "search try {}/{}: hits={} new={} total={}",
+                attempt + 1,
+                tries,
+                round_hits,
+                new_this_round,
+                by_otid.len()
+            );
+        }
+        if round_hits > 0 {
+            non_empty_count += 1;
+            if new_this_round == 0 {
+                consecutive_no_new += 1;
+            } else {
+                consecutive_no_new = 0;
             }
-            last_new = 0;
-        } else {
-            last_new = new_this_round;
+        }
+        if non_empty_count >= 3 && consecutive_no_new >= 2 {
+            break;
         }
         if attempt + 1 < tries {
-            sleep(Duration::from_millis(300));
+            sleep(Duration::from_millis(1500));
         }
     }
     by_otid.into_values().collect()
@@ -386,15 +412,9 @@ fn union_advanced_search_tries(client: &otter::Client, opts: MultiTryOpts<'_>) -
 
 fn merge_hit(existing: &mut Value, new_hit: &Value) -> bool {
     let mut changed = false;
-    // score: keep max
-    let es = existing
-        .get("score")
-        .and_then(Value::as_f64)
-        .unwrap_or(f64::MIN);
-    let ns = new_hit
-        .get("score")
-        .and_then(Value::as_f64)
-        .unwrap_or(f64::MIN);
+    // score: keep max (supports `score` and `_score`; stored as `score`)
+    let es = score_of(existing).unwrap_or(f64::MIN);
+    let ns = score_of(new_hit).unwrap_or(f64::MIN);
     if ns > es {
         existing["score"] = json!(ns);
         changed = true;
@@ -449,19 +469,54 @@ fn merge_hit(existing: &mut Value, new_hit: &Value) -> bool {
     changed
 }
 
+fn should_log_progress(debug: bool) -> bool {
+    if debug {
+        return true;
+    }
+    use std::io::{self, IsTerminal};
+    io::stderr().is_terminal()
+}
+
 fn list_and_filter_by_speakers(
     client: &otter::Client,
     begin: Option<i64>,
     end: Option<i64>,
     speakers: &[String],
     limit: u32,
-    _debug: bool,
+    debug: bool,
 ) -> Option<Vec<Value>> {
     // Fetch listing pages (owned, all folders) starting from begin cutoff.
     let cutoff = begin.map(|b| b as f64);
+    let mut listed_total: usize = 0;
     let listing = collect_pages(true, cutoff, 1000, |cursor| {
-        client.get_speeches_page("0", 100, "owned", cursor)
+        // Per-page timeout/retry wrapper: 3 attempts, 1s backoff.
+        let mut attempts = 0;
+        let mut backoff_ms = 1000u64;
+        loop {
+            attempts += 1;
+            match client.get_speeches_page("0", 100, "owned", cursor) {
+                Ok(resp) => {
+                    let page_len = resp.data["speeches"].as_array().map_or(0, Vec::len);
+                    listed_total = listed_total.saturating_add(page_len);
+                    if should_log_progress(debug) {
+                        eprintln!("listed {} speeches…", listed_total);
+                    }
+                    return Ok(resp);
+                }
+                Err(err) => {
+                    if attempts >= 3 {
+                        return Err(err);
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(backoff_ms));
+                    backoff_ms = (backoff_ms * 2).min(8000);
+                }
+            }
+        }
     });
+    if listing.error.is_some() || !listing.complete {
+        eprintln!("Warning: listing speakers path incomplete or failed; falling back to advanced_search union. Results may be incomplete.");
+        return None;
+    }
     let speeches = listing.data["speeches"].as_array()?.clone();
     // Check presence of speakers metadata.
     let has_speakers = speeches.iter().any(|s| s.get("speakers").is_some());

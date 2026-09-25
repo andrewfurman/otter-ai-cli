@@ -205,6 +205,7 @@ impl Client {
         // The cookie store keeps the session + csrftoken cookies that every
         // later endpoint depends on, like requests.Session in the Python client.
         let http = reqwest::blocking::Client::builder()
+            .timeout(std::time::Duration::from_secs(30))
             .cookie_provider(jar.clone())
             .build()?;
         Ok(Self {

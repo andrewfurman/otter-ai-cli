@@ -83,8 +83,8 @@ enum Command {
         /// Print request/response debug info to stderr
         #[arg(long)]
         debug: bool,
-        /// Number of tries for unioning nondeterministic search (1-10, default 3)
-        #[arg(long, default_value_t = 3, value_parser = clap::value_parser!(u32).range(1..=10))]
+        /// Number of tries for unioning nondeterministic search (1-10, default 5)
+        #[arg(long, default_value_t = 5, value_parser = clap::value_parser!(u32).range(1..=10))]
         tries: u32,
         /// Start date (YYYY-MM-DD) in America/New_York
         #[arg(long, value_parser = clap::builder::NonEmptyStringValueParser::new())]
