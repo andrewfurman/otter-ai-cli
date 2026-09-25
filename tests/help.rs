@@ -22,6 +22,7 @@ fn both_root_help_forms_show_every_command_and_rate_guidance() {
             "login",
             "logout",
             "user",
+            "search",
             "speeches list",
             "speeches get",
             "speeches search",
