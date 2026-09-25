@@ -301,6 +301,64 @@ impl Client {
             .query(&[("otid", speech_id), ("title", title)]))
     }
 
+    /// Build an archive-level advanced search request.
+    /// Confirmed params from web capture: size, session_id, relevance, appid=otter-web.
+    /// Observed filters: q (keyword), speaker (display name), begin_date/end_date (epoch seconds).
+    /// When `speaker` is None, the parameter is omitted; multiple speakers should be
+    /// issued as separate requests by the caller (API support for repeats unknown).
+    pub fn advanced_search_request(
+        &self,
+        q: Option<&str>,
+        speaker: Option<&str>,
+        begin_date: Option<i64>,
+        end_date: Option<i64>,
+        size: u32,
+        relevance: bool,
+        session_id: &str,
+    ) -> reqwest::blocking::RequestBuilder {
+        let mut request = self
+            .http
+            .get(format!("{API_BASE_URL}advanced_search"))
+            .query(&[("size", &size.to_string())])
+            .query(&[("session_id", session_id)])
+            .query(&[("relevance", if relevance { "true" } else { "false" })])
+            .query(&[("appid", "otter-web")]);
+        if let Some(q) = q {
+            if !q.trim().is_empty() {
+                request = request.query(&[("q", q)]);
+            }
+        }
+        if let Some(speaker) = speaker {
+            if !speaker.trim().is_empty() {
+                request = request.query(&[("speaker", speaker)]);
+            }
+        }
+        if let Some(begin) = begin_date {
+            request = request.query(&[("begin_date", &begin.to_string())]);
+        }
+        if let Some(end) = end_date {
+            request = request.query(&[("end_date", &end.to_string())]);
+        }
+        request
+    }
+
+    /// Execute an archive-level advanced search request.
+    pub fn advanced_search(
+        &self,
+        q: Option<&str>,
+        speaker: Option<&str>,
+        begin_date: Option<i64>,
+        end_date: Option<i64>,
+        size: u32,
+        relevance: bool,
+        session_id: &str,
+    ) -> Result<ApiResponse, Error> {
+        let response = self
+            .advanced_search_request(q, speaker, begin_date, end_date, size, relevance, session_id)
+            .send()?;
+        handle_response(response)
+    }
+
     /// Search a speech via GET `advanced_search`.
     /// Speaker filtering is applied client-side; Otter has no documented
     /// list/search query parameter for speaker name or id.
@@ -740,6 +798,46 @@ mod tests {
         assert_eq!(pairs.len(), 2);
         assert_eq!(pairs[0], ("otid".into(), "example-OTID".into()));
         assert_eq!(pairs[1], ("title".into(), title.into()));
+    }
+
+    #[test]
+    fn advanced_search_request_builds_expected_query() {
+        let client = super::Client::new().unwrap();
+        let session = "cli-123";
+        let request = client
+            .advanced_search_request(
+                Some("Disney"),
+                Some("Kate Furman"),
+                Some(1790000000),
+                Some(1790100000),
+                500,
+                true,
+                session,
+            )
+            .build()
+            .unwrap();
+        assert_eq!(request.method(), reqwest::Method::GET);
+        assert_eq!(request.url().path(), "/forward/api/v1/advanced_search");
+        let mut pairs: Vec<_> = request.url().query_pairs().collect();
+        pairs.sort_by(|a, b| a.0.cmp(&b.0));
+        // Ensure confirmed and filter params are present; allow server to reorder
+        let expected = vec![
+            ("appid", "otter-web"),
+            ("begin_date", "1790000000"),
+            ("end_date", "1790100000"),
+            ("q", "Disney"),
+            ("relevance", "true"),
+            ("session_id", session),
+            ("size", "500"),
+            ("speaker", "Kate Furman"),
+        ];
+        for (key, value) in expected {
+            assert!(
+                pairs.contains(&(key.into(), value.into())),
+                "missing {key}={value} in {:?}",
+                pairs
+            );
+        }
     }
 
     #[test]
