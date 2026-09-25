@@ -60,13 +60,7 @@ pub fn run(
         .collect();
 
     let client = authenticated_client();
-    let session_id = format!(
-        "cli-{}",
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_millis())
-            .unwrap_or(0)
-    );
+    let session_id = crate::util::uuid_v4();
 
     // When filtering by a calendar date window, widen the server window to catch
     // imported recordings whose upload time differs from title-embedded time.

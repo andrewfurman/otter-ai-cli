@@ -117,6 +117,55 @@ pub fn api(result: Result<ApiResponse, Error>) -> ApiResponse {
     }
 }
 
+/// Generate a fresh UUID v4 string without introducing heavy dependencies.
+/// Attempts to read from /dev/urandom; falls back to a simple xorshift PRNG
+/// seeded with time, pid, and an address hint. Sets version/variant bits.
+pub fn uuid_v4() -> String {
+    let mut bytes = [0u8; 16];
+    // Best-effort OS entropy on Unix.
+    if let Ok(mut f) = std::fs::File::open("/dev/urandom") {
+        use std::io::Read;
+        let _ = f.read_exact(&mut bytes);
+    } else {
+        // Fallback: xorshift64* based filler
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos() as u64)
+            .unwrap_or(0);
+        let pid = std::process::id() as u64;
+        let addr_hint = {
+            let x = 0u64;
+            (&x as *const u64 as usize) as u64
+        };
+        let mut x = now ^ (pid.rotate_left(13)) ^ addr_hint ^ now.rotate_right(7);
+        let mut next_u64 = || {
+            // xorshift64*
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            x
+        };
+        for chunk in bytes.chunks_mut(8) {
+            let r = next_u64();
+            for (i, b) in chunk.iter_mut().enumerate() {
+                *b = (r >> (i * 8)) as u8;
+            }
+        }
+    }
+    // UUID v4: set version and variant bits.
+    bytes[6] = (bytes[6] & 0x0f) | 0x40; // version 4
+    bytes[8] = (bytes[8] & 0x3f) | 0x80; // variant 10xx
+    // Format 8-4-4-4-12 hex
+    let mut s = String::with_capacity(36);
+    for (i, b) in bytes.iter().enumerate() {
+        if [4, 6, 8, 10].contains(&i) {
+            s.push('-');
+        }
+        s.push_str(&format!("{b:02x}"));
+    }
+    s
+}
+
 /// Epoch seconds -> "Wed Jun 10, 2026 @ 12:41PM ET" (US Eastern), like the
 /// Python CLI; falsy -> "", non-numeric -> the raw value.
 pub fn format_timestamp(epoch: &Value) -> String {
