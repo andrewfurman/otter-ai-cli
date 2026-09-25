@@ -474,7 +474,8 @@ impl Client {
     }
 
     /// Clear a speaker tag on a specific transcript segment.
-    /// This mirrors the browser's "Untag" action on a paragraph.
+    /// This mirrors the browser's "Untag" action on a paragraph by calling
+    /// set_transcript_speaker with speaker_id=0.
     pub fn clear_transcript_speaker(
         &self,
         speech_id: &str,
@@ -483,7 +484,7 @@ impl Client {
         let response = self
             .clear_transcript_request(speech_id, transcript_uuid)?
             .send()?;
-        handle_acknowledgement(response, "unset_transcript_speaker")
+        handle_acknowledgement(response, "set_transcript_speaker")
     }
 
     /// Build the unset request for tests and callers.
@@ -494,10 +495,11 @@ impl Client {
     ) -> Result<reqwest::blocking::RequestBuilder, Error> {
         Ok(self
             .http
-            .get(format!("{API_BASE_URL}unset_transcript_speaker"))
+            .get(format!("{API_BASE_URL}set_transcript_speaker"))
             .query(&[
                 ("speech_otid", speech_id),
                 ("transcript_uuid", transcript_uuid),
+                ("speaker_id", "0"),
                 ("userid", self.userid()?),
             ])
             .header("referer", "https://otter.ai/")
@@ -785,13 +787,14 @@ mod tests {
         assert_eq!(request.method(), reqwest::Method::GET);
         assert_eq!(
             request.url().path(),
-            "/forward/api/v1/unset_transcript_speaker"
+            "/forward/api/v1/set_transcript_speaker"
         );
         let mut pairs: Vec<_> = request.url().query_pairs().collect();
         pairs.sort_by(|a, b| a.0.cmp(&b.0));
         assert_eq!(
             pairs,
             vec![
+                ("speaker_id".into(), "0".into()),
                 ("speech_otid".into(), "otid-abc".into()),
                 ("transcript_uuid".into(), "uuid-xyz".into()),
                 ("userid".into(), "123".into())

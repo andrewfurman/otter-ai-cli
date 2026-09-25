@@ -132,7 +132,7 @@ To clear a mistaken tag when the correct speaker is unknown, use `speakers untag
 otter speakers untag OTID -t UUID1 -t UUID2
 ```
 
-With no `-t` and no `--all`, `speakers untag` also lists segments. `--all` removes the tag from every segment and requires `--yes` to confirm. Based on Otter's Help Center documentation, untagging affects only the specific paragraph — clearing does not propagate across a voice cluster; repeat as needed in other paragraphs.
+With no `-t` and no `--all`, `speakers untag` also lists segments. `--all` removes the tag from every segment and requires `--yes` to confirm. Clearing maps to the same API used for tagging with `speaker_id=0` (no body), which the web app also uses. After untag, Otter shows a generic “Speaker N” label for that paragraph. Clearing affects only the specific paragraph — it does not propagate across a voice cluster; repeat as needed in other paragraphs.
 
 Commands check Otter's JSON status as well as the HTTP status. An explicit non-`OK` API status fails even with HTTP 200, and malformed JSON success responses fail instead of becoming empty results. JSON export errors are reported before writing an output file. API and export HTTP errors retain their status and retry guidance when the server sends a non-JSON error page.
 
