@@ -1,0 +1,52 @@
+{
+  "blocks": [
+    {
+      "type": "text_block",
+      "children": [
+        { "type": "text", "text": "Latest with Emily Graham:" }
+      ]
+    },
+    {
+      "type": "list_block",
+      "children": [
+        {
+          "type": "list_item",
+          "children": [
+            {
+              "type": "text_block",
+              "children": [
+                { "type": "text", "text": "Call about quarterly planning" }
+              ]
+            },
+            {
+              "type": "speech",
+              "text": "Call about quarterly planning",
+              "otid": "abc123",
+              "speech_id": "42",
+              "start_time": "123"
+            }
+          ]
+        },
+        {
+          "type": "list_item",
+          "children": [
+            {
+              "type": "text_block",
+              "children": [
+                { "type": "text", "text": "Follow-up sync" }
+              ]
+            },
+            {
+              "type": "speech",
+              "text": "Follow-up sync",
+              "otid": "abc123",
+              "speech_id": "42",
+              "start_time": "123"
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
+

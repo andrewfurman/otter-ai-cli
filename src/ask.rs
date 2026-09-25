@@ -121,7 +121,14 @@ pub fn ask(question: String, as_json: bool, timeout_secs: u64, debug: bool) {
     // Extract numeric user id from login response for WS URL
     let user_id = value_str(&login.data["userid"]);
     if user_id.is_empty() {
-        fail("Login data did not include a valid userid");
+        let msg = "Login data did not include a valid userid".to_string();
+        if as_json {
+            let obj = json!({"error": msg});
+            print_json(&obj);
+            std::process::exit(1);
+        } else {
+            fail(msg);
+        }
     }
     let dbg_url = format!(
         "wss://ws.aisense.com/api/v2/client/session_update?token={}&userid={}",
@@ -142,10 +149,17 @@ pub fn ask(question: String, as_json: bool, timeout_secs: u64, debug: bool) {
     // Send the question.
     let ack = crate::util::api(client.send_chat_message(&thread_uuid, &question));
     if !ack.ok() {
-        fail(format!(
+        let msg = format!(
             "Failed to send chat message: {}",
             crate::util::result_repr(&ack)
-        ));
+        );
+        if as_json {
+            let obj = json!({"error": msg});
+            print_json(&obj);
+            std::process::exit(1);
+        } else {
+            fail(msg);
+        }
     }
     let message_obj = &ack.data["message"];
     let message_uuid = value_str(&message_obj["message_uuid"]);
@@ -153,7 +167,15 @@ pub fn ask(question: String, as_json: bool, timeout_secs: u64, debug: bool) {
         if debug {
             eprintln!("Debug: POST ack keys: {}", list_paths(&ack.data).join(", "));
         }
-        fail("Chat acknowledgement did not include message_uuid; cannot receive answer.");
+        let msg =
+            "Chat acknowledgement did not include message_uuid; cannot receive answer.".to_string();
+        if as_json {
+            let obj = json!({"error": msg});
+            print_json(&obj);
+            std::process::exit(1);
+        } else {
+            fail(msg);
+        }
     }
     let session_uuid = value_str(&message_obj["session_uuid"]);
     let effective_thread_uuid = if session_uuid.is_empty() {
@@ -186,7 +208,7 @@ pub fn ask(question: String, as_json: bool, timeout_secs: u64, debug: bool) {
                         serde_json::from_str::<Value>(&msg.into_text().unwrap_or_default())
                     {
                         // Per-frame debug summary
-                        {
+                        if debug {
                             let top_keys = v
                                 .as_object()
                                 .map(|m| m.keys().cloned().collect::<Vec<_>>())
@@ -316,10 +338,19 @@ pub fn ask(question: String, as_json: bool, timeout_secs: u64, debug: bool) {
     let remaining = deadline.saturating_duration_since(Instant::now());
     let update = match rx.recv_timeout(remaining) {
         Ok(v) => v,
-        Err(_) => fail(format!(
-            "Timed out waiting for AI Chat answer after {} seconds",
-            timeout_secs
-        )),
+        Err(_) => {
+            let msg = format!(
+                "Timed out waiting for AI Chat answer after {} seconds",
+                timeout_secs
+            );
+            if as_json {
+                let obj = json!({"error": msg});
+                print_json(&obj);
+                std::process::exit(1);
+            } else {
+                fail(msg);
+            }
+        }
     };
     if debug {
         if let Some(reason) = &update.closed {
@@ -341,14 +372,16 @@ pub fn ask(question: String, as_json: bool, timeout_secs: u64, debug: bool) {
     }
     let message = update.message;
     let blocks = message["blocks"].clone();
-    let mut answer_text = render_blocks(&blocks);
+    let mut sources_list: Vec<SourceInfo> = Vec::new();
+    let mut answer_text = render_blocks(&blocks, &mut sources_list);
     if answer_text.trim().is_empty() {
         let fallback = value_str(&message["text"]);
         if !fallback.trim().is_empty() {
             answer_text = fallback;
         }
     }
-    let sources = extract_sources(&blocks);
+    // Merge in any additional sources not seen during rendering (URL nodes etc.)
+    collect_sources_from_urls(&blocks, &mut sources_list);
 
     if answer_text.trim().is_empty() {
         let errmsg = if let Some(reason) = update.closed {
@@ -376,17 +409,27 @@ pub fn ask(question: String, as_json: bool, timeout_secs: u64, debug: bool) {
             "question": question,
             "answer_text": answer_text,
             "blocks": blocks,
-            "sources": sources,
+            "sources": sources_list.iter().map(|s| json!({
+                "title": s.title,
+                "otid": s.otid,
+                "speech_id": s.speech_id,
+                "start_time": s.start_time
+            })).collect::<Vec<_>>(),
             "thread_uuid": effective_thread_uuid,
             "message_uuid": message_uuid
         });
         print_json(&out);
     } else {
         println!("{answer_text}");
-        if !sources.is_empty() {
+        if !sources_list.is_empty() {
             println!("\nSources:");
-            for s in sources {
-                println!("- {s}");
+            for s in &sources_list {
+                let title = if s.title.is_empty() {
+                    "(untitled)"
+                } else {
+                    &s.title
+                };
+                println!("- {} [{}]", title, s.otid);
             }
         }
     }
@@ -550,79 +593,296 @@ fn connect_ws(
     }
 }
 
-fn render_blocks(blocks: &Value) -> String {
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct SourceInfo {
+    title: String,
+    otid: String,
+    speech_id: String,
+    start_time: String,
+}
+
+fn render_blocks(blocks: &Value, sources: &mut Vec<SourceInfo>) -> String {
     let mut out = String::new();
-    let mut wrote_something = false;
-    if let Some(items) = blocks.as_array() {
-        for block in items {
-            let btype = block["type"].as_str().unwrap_or_default();
-            let children = block["children"].as_array().cloned().unwrap_or_default();
-            if btype == "list" {
-                for child in children {
-                    let text = value_str(&child["text"]).trim().to_string();
-                    if !text.is_empty() {
-                        out.push_str("- ");
-                        out.push_str(&text);
-                        out.push('\n');
-                        wrote_something = true;
-                    }
-                }
-            } else {
-                let mut para = String::new();
-                for child in children {
-                    let text = value_str(&child["text"]);
-                    if !text.is_empty() {
-                        if !para.is_empty() {
-                            para.push(' ');
-                        }
-                        para.push_str(&text);
-                    }
-                }
-                if !para.is_empty() {
-                    if wrote_something && !out.ends_with("\n\n") {
-                        if !out.ends_with('\n') {
-                            out.push('\n');
-                        }
-                        out.push('\n');
-                    }
-                    out.push_str(&para);
-                    out.push('\n');
-                    wrote_something = true;
-                }
-            }
-        }
-    }
+    render_nodes(blocks, 0, false, &mut out, sources);
     out.trim_end().to_string()
 }
 
-fn extract_sources(blocks: &Value) -> Vec<String> {
-    let mut out = Vec::new();
-    let mut seen = std::collections::HashSet::new();
-    fn scrape(value: &Value, out: &mut Vec<String>, seen: &mut std::collections::HashSet<String>) {
-        match value {
-            Value::Object(map) => {
-                if let Some(url) = map.get("url").and_then(Value::as_str) {
-                    if let Some(otid) = otid_from_url(url) {
-                        if seen.insert(otid.clone()) {
-                            out.push(otid);
-                        }
+fn render_nodes(
+    node: &Value,
+    indent: usize,
+    in_list_item: bool,
+    out: &mut String,
+    sources: &mut Vec<SourceInfo>,
+) {
+    match node {
+        Value::Array(items) => {
+            for item in items {
+                render_nodes(item, indent, in_list_item, out, sources);
+            }
+        }
+        Value::Object(map) => {
+            let node_type = map.get("type").and_then(Value::as_str).unwrap_or("");
+            match node_type {
+                "list_block" => {
+                    if let Some(children) = map.get("children") {
+                        render_nodes(children, indent, false, out, sources);
                     }
                 }
-                for v in map.values() {
-                    scrape(v, out, seen);
+                "list_item" => {
+                    // Render the item's inline text first on one line
+                    let mut line = String::new();
+                    if let Some(children) = map.get("children") {
+                        collect_inline(children, &mut line, sources);
+                        let trimmed = line.trim();
+                        if !trimmed.is_empty() {
+                            out.push_str(&"  ".repeat(indent));
+                            out.push_str("- ");
+                            out.push_str(trimmed);
+                            out.push('\n');
+                        }
+                        // Render any nested lists under this item with increased indent
+                        render_nested_lists(children, indent + 1, out, sources);
+                    }
+                }
+                "text_block" => {
+                    // Paragraph of inline text
+                    let mut para = String::new();
+                    if let Some(children) = map.get("children") {
+                        collect_inline(children, &mut para, sources);
+                    }
+                    let trimmed = para.trim();
+                    if !trimmed.is_empty() {
+                        // Paragraph separation
+                        if !out.is_empty() && !out.ends_with("\n\n") {
+                            if !out.ends_with('\n') {
+                                out.push('\n');
+                            }
+                            out.push('\n');
+                        }
+                        out.push_str(trimmed);
+                        out.push('\n');
+                    }
+                }
+                "text" => {
+                    let t = map.get("text").and_then(Value::as_str).unwrap_or("");
+                    if !t.is_empty() {
+                        if in_list_item && !out.ends_with(' ') {
+                            out.push(' ');
+                        }
+                        out.push_str(t);
+                    }
+                }
+                "speech" => {
+                    // Inline citation: title text + [otid]
+                    let title = map
+                        .get("text")
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                        .to_string();
+                    let otid = value_str(map.get("otid").unwrap_or(&Value::Null));
+                    if !title.is_empty() {
+                        if in_list_item && !out.ends_with(' ') {
+                            out.push(' ');
+                        }
+                        out.push_str(&title);
+                        if !otid.is_empty() {
+                            out.push(' ');
+                            out.push('[');
+                            out.push_str(&otid);
+                            out.push(']');
+                        }
+                    }
+                    // Collect source
+                    if !otid.is_empty() {
+                        let speech_id = value_str(map.get("speech_id").unwrap_or(&Value::Null));
+                        let start_time = value_str(map.get("start_time").unwrap_or(&Value::Null));
+                        add_source(
+                            sources,
+                            SourceInfo {
+                                title,
+                                otid,
+                                speech_id,
+                                start_time,
+                            },
+                        );
+                    }
+                    // Recurse into any children of the speech node as well
+                    if let Some(children) = map.get("children") {
+                        render_nodes(children, indent, in_list_item, out, sources);
+                    }
+                }
+                _ => {
+                    // Unknown node: recurse into children/content to avoid dropping text
+                    if let Some(children) = map.get("children") {
+                        render_nodes(children, indent, in_list_item, out, sources);
+                    }
+                    if let Some(content) = map.get("content") {
+                        render_nodes(content, indent, in_list_item, out, sources);
+                    }
                 }
             }
-            Value::Array(items) => {
-                for v in items {
-                    scrape(v, out, seen);
-                }
-            }
-            _ => {}
         }
+        _ => {}
     }
-    scrape(blocks, &mut out, &mut seen);
-    out
 }
+
+fn render_nested_lists(
+    node: &Value,
+    indent: usize,
+    out: &mut String,
+    sources: &mut Vec<SourceInfo>,
+) {
+    match node {
+        Value::Array(items) => {
+            for item in items {
+                render_nested_lists(item, indent, out, sources);
+            }
+        }
+        Value::Object(map) => {
+            let node_type = map.get("type").and_then(Value::as_str).unwrap_or("");
+            if node_type == "list_block" || node_type == "list" {
+                render_nodes(&Value::Object(map.clone()), indent, false, out, sources);
+                return;
+            }
+            if let Some(children) = map.get("children") {
+                render_nested_lists(children, indent, out, sources);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn collect_inline(node: &Value, out: &mut String, sources: &mut Vec<SourceInfo>) {
+    match node {
+        Value::Array(items) => {
+            for item in items {
+                collect_inline(item, out, sources);
+            }
+        }
+        Value::Object(map) => {
+            let node_type = map.get("type").and_then(Value::as_str).unwrap_or("");
+            // Some nodes may be untyped text containers with a "text" field
+            if node_type.is_empty() {
+                if let Some(t) = map.get("text").and_then(Value::as_str) {
+                    if !t.is_empty() {
+                        if !out.is_empty() && !out.ends_with(' ') {
+                            out.push(' ');
+                        }
+                        out.push_str(t);
+                        return;
+                    }
+                }
+            }
+            match node_type {
+                "text" => {
+                    // Treat text nodes as inline content; if they have children, include them
+                    let mut para = String::new();
+                    if let Some(t) = map.get("text").and_then(Value::as_str) {
+                        if !t.is_empty() {
+                            para.push_str(t);
+                        }
+                    }
+                    if let Some(children) = map.get("children") {
+                        collect_inline(children, &mut para, sources);
+                    }
+                    if !para.is_empty() {
+                        if !out.is_empty() && !out.ends_with(' ') {
+                            out.push(' ');
+                        }
+                        out.push_str(&para);
+                    }
+                }
+                "text_block" => {
+                    if let Some(children) = map.get("children") {
+                        collect_inline(children, out, sources);
+                    }
+                }
+                "speech" => {
+                    let title = map
+                        .get("text")
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                        .to_string();
+                    let otid = value_str(map.get("otid").unwrap_or(&Value::Null));
+                    if !title.is_empty() {
+                        if !out.is_empty() && !out.ends_with(' ') {
+                            out.push(' ');
+                        }
+                        out.push_str(&title);
+                        if !otid.is_empty() {
+                            out.push(' ');
+                            out.push('[');
+                            out.push_str(&otid);
+                            out.push(']');
+                        }
+                    }
+                    if !otid.is_empty() {
+                        let speech_id = value_str(map.get("speech_id").unwrap_or(&Value::Null));
+                        let start_time = value_str(map.get("start_time").unwrap_or(&Value::Null));
+                        add_source(
+                            sources,
+                            SourceInfo {
+                                title,
+                                otid,
+                                speech_id,
+                                start_time,
+                            },
+                        );
+                    }
+                }
+                _ => {
+                    if let Some(children) = map.get("children") {
+                        collect_inline(children, out, sources);
+                    }
+                    if let Some(content) = map.get("content") {
+                        collect_inline(content, out, sources);
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+fn add_source(sources: &mut Vec<SourceInfo>, src: SourceInfo) {
+    if !sources.iter().any(|s| s.otid == src.otid) {
+        sources.push(src);
+    }
+}
+
+fn collect_sources_from_urls(node: &Value, sources: &mut Vec<SourceInfo>) {
+    match node {
+        Value::Array(items) => {
+            for item in items {
+                collect_sources_from_urls(item, sources);
+            }
+        }
+        Value::Object(map) => {
+            if let Some(url) = map.get("url").and_then(Value::as_str) {
+                if let Some(otid) = otid_from_url(url) {
+                    add_source(
+                        sources,
+                        SourceInfo {
+                            title: String::new(),
+                            otid,
+                            speech_id: String::new(),
+                            start_time: String::new(),
+                        },
+                    );
+                }
+            }
+            if let Some(children) = map.get("children") {
+                collect_sources_from_urls(children, sources);
+            }
+            if let Some(content) = map.get("content") {
+                collect_sources_from_urls(content, sources);
+            }
+        }
+        _ => {}
+    }
+}
+
+// legacy helper no longer used; kept out to satisfy old references
 
 fn otid_from_url(url: &str) -> Option<String> {
     // Accept absolute or relative otter links: https://otter.ai/u/<otid>?..., or /u/<otid>
@@ -658,10 +918,14 @@ mod tests {
     #[test]
     fn render_blocks_supports_text_and_list_items() {
         let blocks = json!([
-            {"type":"text","children":[{"text":"Hello world"},{"text":"from Otter"}]},
-            {"type":"list","children":[{"text":"One"},{"text":"Two"}]}
+            {"type":"text_block","children":[{"type":"text","text":"Hello world"},{"type":"text","text":"from Otter"}]},
+            {"type":"list_block","children":[
+                {"type":"list_item","children":[{"type":"text_block","children":[{"type":"text","text":"One"}]}]},
+                {"type":"list_item","children":[{"type":"text_block","children":[{"type":"text","text":"Two"}]}]}
+            ]}
         ]);
-        let text = render_blocks(&blocks);
+        let mut sources = Vec::new();
+        let text = render_blocks(&blocks, &mut sources);
         assert!(text.contains("Hello world from Otter"));
         assert!(text.contains("- One"));
         assert!(text.contains("- Two"));
@@ -678,9 +942,22 @@ mod tests {
                 {"text":"- item with /u/def456"}
             ]}
         ]);
-        let sources = extract_sources(&blocks);
-        assert!(sources.contains(&"abc123".to_string()));
-        // The second isn't a link; only URL fields are parsed.
-        assert!(!sources.contains(&"def456".to_string()));
+        let mut sources = Vec::new();
+        collect_sources_from_urls(&blocks, &mut sources);
+        assert!(sources.iter().any(|s| s.otid == "abc123"));
+        assert!(!sources.iter().any(|s| s.otid == "def456"));
+    }
+
+    #[test]
+    fn render_fixture_lists_and_sources() {
+        let value: Value =
+            serde_json::from_str(include_str!("../tests/fixtures/ask_emily.json")).unwrap();
+        let blocks = &value["blocks"];
+        let mut sources = Vec::new();
+        let text = render_blocks(blocks, &mut sources);
+        assert!(text.contains("- Call about quarterly planning"));
+        assert!(text.contains("- Follow-up sync"));
+        assert_eq!(sources.len(), 1);
+        assert_eq!(sources[0].otid, "abc123");
     }
 }
