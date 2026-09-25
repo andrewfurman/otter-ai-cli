@@ -154,6 +154,8 @@ pub fn ask(question: String, as_json: bool, timeout_secs: u64, debug: bool) {
         message: Value,
         received: usize,
         matched: usize,
+        closed: Option<String>,
+        error: Option<String>,
     }
     let (tx, rx) = mpsc::channel::<ChatUpdate>();
     let target_uuid = message_uuid.clone();
@@ -163,6 +165,8 @@ pub fn ask(question: String, as_json: bool, timeout_secs: u64, debug: bool) {
         let mut received = 0usize;
         let mut matched = 0usize;
         let mut last_ping = Instant::now();
+        let mut closed: Option<String> = None;
+        let mut error: Option<String> = None;
         loop {
             match socket.read() {
                 Ok(msg) if msg.is_text() => {
@@ -170,6 +174,35 @@ pub fn ask(question: String, as_json: bool, timeout_secs: u64, debug: bool) {
                     if let Ok(v) =
                         serde_json::from_str::<Value>(&msg.into_text().unwrap_or_default())
                     {
+                        // Per-frame debug summary
+                        {
+                            let top_keys = v
+                                .as_object()
+                                .map(|m| m.keys().cloned().collect::<Vec<_>>())
+                                .unwrap_or_default();
+                            let mkeys = v
+                                .get("message")
+                                .and_then(|m| m.as_object())
+                                .map(|m| m.keys().cloned().collect::<Vec<_>>())
+                                .unwrap_or_default();
+                            let t = v.get("type").and_then(Value::as_str).unwrap_or_default();
+                            let a = v.get("action").and_then(Value::as_str).unwrap_or_default();
+                            let message = &v["message"];
+                            let tmatch = value_str(&message["thread_uuid"]) == thread_uuid_clone;
+                            let echo_uuid = value_str(&message["uuid"]) == target_uuid;
+                            let author = value_str(&message["author"]).to_ascii_lowercase();
+                            let is_user = author == "user";
+                            eprintln!(
+                                "Debug: frame type={} action={} top=[{}] message_keys=[{}] tmatch={} echo_uuid={} is_user={}",
+                                t,
+                                a,
+                                top_keys.join(","),
+                                mkeys.join(","),
+                                tmatch,
+                                echo_uuid,
+                                is_user
+                            );
+                        }
                         if v["status"]
                             .as_str()
                             .is_some_and(|s| s.eq_ignore_ascii_case("OK"))
@@ -178,10 +211,10 @@ pub fn ask(question: String, as_json: bool, timeout_secs: u64, debug: bool) {
                         {
                             let message = &v["message"];
                             let tmatch = value_str(&message["thread_uuid"]) == thread_uuid_clone;
-                            let qmatch = value_str(&message["query_message_uuid"]) == target_uuid;
+                            let echo_uuid = value_str(&message["uuid"]) == target_uuid;
                             let author = value_str(&message["author"]).to_ascii_lowercase();
-                            let is_assistant = author == "assistant";
-                            if tmatch && (qmatch || is_assistant) {
+                            let is_user = author == "user";
+                            if tmatch && !(echo_uuid || is_user) {
                                 matched += 1;
                                 latest = Some(message.clone());
                                 if message["finished"].as_bool() == Some(true) {
@@ -189,6 +222,8 @@ pub fn ask(question: String, as_json: bool, timeout_secs: u64, debug: bool) {
                                         message: message.clone(),
                                         received,
                                         matched,
+                                        closed: None,
+                                        error: None,
                                     });
                                     break;
                                 }
@@ -201,8 +236,46 @@ pub fn ask(question: String, as_json: bool, timeout_secs: u64, debug: bool) {
                         }
                     }
                 }
-                Ok(_) => {}      // ignore non-text frames
-                Err(_) => break, // socket closed or error
+                Ok(msg) if msg.is_ping() => {
+                    let payload = msg.into_data();
+                    let _ = socket.write(tungstenite::Message::Pong(payload));
+                    continue;
+                }
+                Ok(msg) if msg.is_close() => {
+                    let reason = if let tungstenite::Message::Close(Some(cf)) = msg {
+                        format!("code={} reason={}", cf.code, cf.reason)
+                    } else {
+                        "unknown".into()
+                    };
+                    closed = Some(reason);
+                    break;
+                }
+                Ok(_) => {} // ignore non-text frames
+                Err(err) => {
+                    if let tungstenite::Error::Io(ioe) = &err {
+                        if ioe.kind() == std::io::ErrorKind::WouldBlock
+                            || ioe.kind() == std::io::ErrorKind::TimedOut
+                        {
+                            if last_ping.elapsed() >= Duration::from_secs(20) {
+                                let _ = socket.write(tungstenite::Message::Text(
+                                    r#"{"action":"ping"}"#.into(),
+                                ));
+                                last_ping = Instant::now();
+                            }
+                            continue;
+                        }
+                    }
+                    match err {
+                        tungstenite::Error::ConnectionClosed
+                        | tungstenite::Error::AlreadyClosed => {
+                            closed = Some("closed".into());
+                        }
+                        other => {
+                            error = Some(format!("{other}"));
+                        }
+                    }
+                    break;
+                }
             }
         }
         if let Some(v) = latest {
@@ -210,6 +283,16 @@ pub fn ask(question: String, as_json: bool, timeout_secs: u64, debug: bool) {
                 message: v,
                 received,
                 matched,
+                closed,
+                error,
+            });
+        } else {
+            let _ = tx.send(ChatUpdate {
+                message: Value::Null,
+                received,
+                matched,
+                closed,
+                error,
             });
         }
     });
@@ -224,10 +307,22 @@ pub fn ask(question: String, as_json: bool, timeout_secs: u64, debug: bool) {
         )),
     };
     if debug {
-        eprintln!(
-            "Debug: frames received={}, matched={}",
-            update.received, update.matched
-        );
+        if let Some(reason) = &update.closed {
+            eprintln!(
+                "Debug: websocket closed: {} (frames received={} matched={})",
+                reason, update.received, update.matched
+            );
+        } else if let Some(err) = &update.error {
+            eprintln!(
+                "Debug: websocket error: {} (frames received={} matched={})",
+                err, update.received, update.matched
+            );
+        } else {
+            eprintln!(
+                "Debug: frames received={} matched={}",
+                update.received, update.matched
+            );
+        }
     }
     let message = update.message;
     let blocks = message["blocks"].clone();
@@ -409,6 +504,12 @@ fn connect_ws(
         .expect("ws url parses into request");
     req.headers_mut()
         .insert("Origin", "https://otter.ai".parse().unwrap());
+    req.headers_mut().insert(
+        "User-Agent",
+        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) OtterCLI/0.1 Safari/537.36"
+            .parse()
+            .unwrap(),
+    );
     match tungstenite::client::connect(req) {
         Ok((sock, resp)) => Ok((sock, resp.status().as_u16())),
         Err(_err) => Err(ConnectError),
