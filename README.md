@@ -106,6 +106,8 @@ otter speeches list --all --page-size 100 --speaker "Alice" --json
 
 `speeches move --create` creates a folder only when a successful folder lookup confirms that its name is missing. A failed lookup stops the command before any folder creation or moves, including permission, rate-limit, network, and malformed-response errors. Creation must return a valid folder ID before the move proceeds.
 
+Otter skips recordings that are in its trash. When a move can't be confirmed, the CLI looks up each unconfirmed recording and says which ones are missing from your active recordings (usually trashed), so you can restore them in Otter first. `speeches list` marks trashed rows with `[TRASH]` (in `--json` they have `"deleted": true`).
+
 Pass move OTIDs as separate arguments. The CLI removes duplicates and sends one comma-separated `speech_otid_list` form value: repeated form fields were observed to move only the last recording despite an `OK` response. Success now requires every requested OTID in `added_speech_otids`. Partial acknowledgement exits nonzero and lists confirmed/unconfirmed IDs; a missing or malformed acknowledgement reports unconfirmed completion. Reload affected recordings before retrying; moves are not automatically replayed.
 
 `speeches download --output PATH` writes to that **exact path**, including when it has no extension. For example, `--format mp3 --output interview.mp3` produces `interview.mp3`. Without `--output`, the filename is `OTID.<format>`, or `OTID.zip` for multiple comma-separated formats. Older versions treated `--output` as a stem and appended an extension; include the extension yourself when upgrading scripts that relied on that behavior.
