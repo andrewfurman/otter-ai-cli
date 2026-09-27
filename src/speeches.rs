@@ -92,7 +92,13 @@ fn print_listing(data: &Value, incomplete: bool) {
         } else {
             ""
         };
-        println!("  {otid}  {title}{live_tag}");
+        // Listings include recordings in Otter's trash; mark them so they aren't mistaken for active ones.
+        let trash_tag = if speech["deleted"].as_bool() == Some(true) {
+            " [TRASH]"
+        } else {
+            ""
+        };
+        println!("  {otid}  {title}{live_tag}{trash_tag}");
 
         let mut parts: Vec<String> = Vec::new();
         if truthy(&speech["created_at"]) {
@@ -328,7 +334,14 @@ pub fn move_to_folder(speech_ids: Vec<String>, folder: String, create: bool) {
     if !result.ok() {
         fail(format!("Failed to move speeches: {}", result_repr(&result)));
     }
-    verify_moved(&speech_ids, &result.data).unwrap_or_else(|message| fail(message));
+    if let Err(message) = verify_moved(&speech_ids, &result.data) {
+        // Otter silently skips recordings in its trash; say so instead of a bare "unconfirmed".
+        let missing: Vec<String> = unconfirmed_ids(&speech_ids, &result.data)
+            .into_iter()
+            .filter(|id| matches!(client.get_speech(id), Ok(r) if r.status == 404))
+            .collect();
+        fail(format!("{message}{}", trash_note(&missing)));
+    }
 
     if speech_ids.len() == 1 {
         println!("Moved speech {} to folder {folder}", speech_ids[0]);
@@ -367,6 +380,28 @@ fn verify_moved(requested: &[String], data: &Value) -> Result<(), String> {
             confirmed.len(), requested.len(), confirmed.join(","), unconfirmed.join(",")));
     }
     Ok(())
+}
+
+fn unconfirmed_ids(requested: &[String], data: &Value) -> Vec<String> {
+    let added: HashSet<&str> = data["added_speech_otids"]
+        .as_array()
+        .map(|ids| ids.iter().filter_map(Value::as_str).collect())
+        .unwrap_or_default();
+    requested
+        .iter()
+        .filter(|id| !added.contains(id.as_str()))
+        .cloned()
+        .collect()
+}
+
+fn trash_note(missing: &[String]) -> String {
+    if missing.is_empty() {
+        return String::new();
+    }
+    format!(
+        "\nNot found among your active recordings (usually because they're in Otter's trash): {}. Restore them in Otter before moving.",
+        missing.join(",")
+    )
 }
 
 fn speaker_names(speakers: &Value) -> Vec<String> {
@@ -457,6 +492,19 @@ mod tests {
         for ids in [vec![], vec!["  ".into()], vec!["a,b".into()]] {
             assert!(prepare_move_ids(ids).is_err());
         }
+    }
+
+    #[test]
+    fn move_explains_recordings_missing_because_of_trash() {
+        let requested = vec!["a".into(), "b".into(), "c".into()];
+        let data = json!({"status": "OK", "added_speech_otids": ["b"]});
+        assert_eq!(unconfirmed_ids(&requested, &data), ["a", "c"]);
+        assert_eq!(unconfirmed_ids(&requested, &json!({})), ["a", "b", "c"]);
+        assert_eq!(trash_note(&[]), "");
+        let note = trash_note(&["a".into(), "c".into()]);
+        assert!(note.contains("Otter's trash"));
+        assert!(note.contains("a,c"));
+        assert!(note.contains("Restore them in Otter"));
     }
 
     #[test]
