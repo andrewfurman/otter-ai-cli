@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run finite JSON archive batches hourly; stop when the snapshot is complete."""
+"""Run finite JSON archive batches at a configurable interval; stop when the snapshot is complete."""
 import argparse
 import json
 from pathlib import Path
@@ -14,7 +14,10 @@ def main():
     parser.add_argument('output', type=Path)
     parser.add_argument('--notes-repo', type=Path, required=True)
     parser.add_argument('--initial-delay-seconds', type=int, default=0)
+    parser.add_argument('--interval-seconds', type=int, default=600)
     args = parser.parse_args()
+    if args.interval_seconds < 1 or args.initial_delay_seconds < 0:
+        parser.error('interval must be positive and initial delay must be nonnegative')
     project = Path(__file__).resolve().parents[1]
     output = args.output.resolve()
     output.mkdir(parents=True, exist_ok=True)
@@ -35,7 +38,7 @@ def main():
             ], stdout=log, stderr=log)
             publish(output, repository)
             rate_file = output / 'rate-limits.jsonl'
-            wait = 3600
+            wait = args.interval_seconds
             if rate_file.exists():
                 # This log contains only UTC epochs, endpoint categories, HTTP statuses and delays.
                 observations.write_text(rate_file.read_text())
@@ -48,7 +51,7 @@ def main():
             if result.returncode == 0 and (manifest.get('complete') or manifest.get('finished')):
                 print(f"Archive traversal finished; unavailable={manifest.get('unavailable', 0)}; complete={manifest.get('complete')}. Worker stopped.", file=log)
                 return
-            # Retry read failures only on the hourly cadence, with a finite failure budget.
+            # Retry read failures only on the configured cadence, with a finite failure budget.
             if result.returncode != 0:
                 recent = (output / 'rate-limits.jsonl').read_text() if rate_file.exists() else ''
                 events = [json.loads(line) for line in recent.splitlines() if line.strip()]

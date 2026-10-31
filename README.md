@@ -116,7 +116,7 @@ Uploads stream the audio file, and downloads stream into a temporary file beside
 
 ## Structured JSON export
 
-Use `otter speeches export-json OUTPUT --delay 10 --max-new 25` for resumable batches with speaker names and timestamps. See [the JSON archive guide](docs/json-export.md) for the schema, search examples, hourly worker and rate-limit evidence.
+Use `otter speeches export-json OUTPUT --delay 10 --max-new 25` for resumable batches with speaker names and timestamps. See [the JSON archive guide](docs/json-export.md) for the schema, search examples, scheduled worker and rate-limit evidence.
 
 ## Ask Otter's AI Chat
 
