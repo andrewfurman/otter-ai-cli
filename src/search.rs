@@ -826,7 +826,7 @@ fn apply_user_window_filter(hits: Vec<Value>, user_begin: i64, user_end: i64) ->
         .collect()
 }
 
-fn parse_title_time_et(title: &str) -> Option<i64> {
+pub(crate) fn parse_title_time_et(title: &str) -> Option<i64> {
     // Suffix: " on Mon Sep 21st 2026 @ 7:37am ET"
     let idx = title.rfind(" on ")?;
     let suffix = &title[idx + 4..];
