@@ -13,6 +13,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('output', type=Path)
     parser.add_argument('--notes-repo', type=Path, required=True)
+    parser.add_argument('--initial-delay-seconds', type=int, default=0)
     args = parser.parse_args()
     project = Path(__file__).resolve().parents[1]
     output = args.output.resolve()
@@ -20,6 +21,10 @@ def main():
     observations = project / 'docs' / 'export-rate-limit-observations.jsonl'
     repository = args.notes_repo.resolve()
     with (output / 'worker.log').open('a', buffering=1) as log:
+        if args.initial_delay_seconds > 0:
+            print(f'Waiting {args.initial_delay_seconds} seconds before the next batch.', file=log)
+            time.sleep(args.initial_delay_seconds)
+        consecutive_failures = 0
         while True:
             # Recover a previously interrupted PR publication before more API requests.
             publish(output, repository)
@@ -43,12 +48,15 @@ def main():
             if result.returncode == 0 and manifest.get('complete'):
                 print('Archive snapshot complete; worker stopped.', file=log)
                 return
-            # Non-rate-limit failures need investigation; do not retry indefinitely.
+            # Retry read failures only on the hourly cadence, with a finite failure budget.
             if result.returncode != 0:
                 recent = (output / 'rate-limits.jsonl').read_text() if rate_file.exists() else ''
                 events = [json.loads(line) for line in recent.splitlines() if line.strip()]
-                if not events or events[-1]['observed_at_unix_seconds'] < time.time() - 180:
-                    raise SystemExit('Export failed without a recent 429; see worker.log and manifest.json')
+                consecutive_failures += 1
+                if consecutive_failures >= 3:
+                    raise SystemExit('Three consecutive failed batches; see worker.log and manifest.json')
+            else:
+                consecutive_failures = 0
             print(f'Next batch in {int(wait)} seconds.', file=log)
             time.sleep(wait)
 

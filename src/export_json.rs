@@ -147,6 +147,27 @@ fn check_response(
     Ok(())
 }
 
+fn merge_listing(current: &mut Value, prior: &Value) {
+    let mut seen = std::collections::HashSet::new();
+    let mut speeches = Vec::new();
+    for data in [prior, &*current] {
+        if let Some(items) = data["speeches"].as_array() {
+            for speech in items {
+                if let Some(id) = speech["otid"].as_str() {
+                    if seen.insert(id.to_owned()) {
+                        speeches.push(speech.clone());
+                    }
+                }
+            }
+        }
+    }
+    if current["last_load_ts"].as_u64().is_none() {
+        current["last_load_ts"] = prior["last_load_ts"].clone();
+    }
+    current["pagination"]["unique_fetched"] = json!(speeches.len());
+    current["speeches"] = json!(speeches);
+}
+
 pub fn run(output: PathBuf, source: String, delay: u64, max_new: u32) {
     if let Err(error) = export(&output, &source, delay, max_new) {
         fail(error.to_string());
@@ -170,30 +191,58 @@ fn export(
     let previous: Option<Value> = fs::read(&output.join("manifest.json"))
         .ok()
         .and_then(|b| serde_json::from_slice(&b).ok());
-    let listing = if cached.exists()
-        && previous
-            .as_ref()
-            .is_some_and(|m| m["source"] == source && m["listing_complete"] == true)
-    {
-        let data: Value = serde_json::from_slice(&fs::read(&cached)?)?;
+    let prior = if cached.exists() && previous.as_ref().is_some_and(|m| m["source"] == source) {
+        Some(serde_json::from_slice::<Value>(&fs::read(&cached)?)?)
+    } else {
+        None
+    };
+    let pending = prior
+        .as_ref()
+        .and_then(|data| data["speeches"].as_array())
+        .map(|speeches| {
+            speeches
+                .iter()
+                .filter(|speech| {
+                    speech["otid"].as_str().is_some_and(|id| {
+                        let name = id.bytes().map(|b| format!("{b:02x}")).collect::<String>();
+                        !output.join(format!("conversations/{name}.json")).exists()
+                    })
+                })
+                .count()
+        })
+        .unwrap_or(0);
+    let prior_complete = prior
+        .as_ref()
+        .is_some_and(|data| data["pagination"]["complete"] == true);
+    let listing = if prior_complete || pending >= max_new as usize {
         pagination::Listing {
-            data,
-            complete: true,
+            data: prior.unwrap(),
+            complete: prior_complete,
             error: None,
         }
     } else {
+        let resume = prior
+            .as_ref()
+            .and_then(|data| data["last_load_ts"].as_u64());
         let mut pages = 0;
-        let listing = pagination::collect_pages(true, None, 1000, |cursor| {
+        // Bound discovery too; resume older pages on a later batch.
+        let mut listing = pagination::collect_pages(true, None, 3, |cursor| {
             thread::sleep(Duration::from_secs(delay));
-            let response = client.get_speeches_page("0", 100, source, cursor)?;
+            let response = client.get_speeches_page("0", 100, source, cursor.or(resume))?;
             pages += 1;
             eprintln!("Listing page {pages}: HTTP {}", response.status);
-            // Record rate limits without retaining response bodies or account identifiers.
             if response.status == 429 {
                 let _ = record_limit("listing", response.retry_after_seconds, output);
             }
             Ok(response)
         });
+        if listing.data["pagination"]["stop_reason"] == "page_limit" {
+            listing.error = None;
+            listing.data["pagination"]["error"] = Value::Null;
+        }
+        if let Some(prior) = prior {
+            merge_listing(&mut listing.data, &prior);
+        }
         save(&cached, &archive_metadata(&listing.data))?;
         listing
     };
@@ -210,8 +259,10 @@ fn export(
     let mut manifest = json!({"schema_version": 1, "source": source, "listing_complete": listing.complete,
         "total": speeches.len(), "order": "recorded_at_desc", "exported": 0, "complete": false, "error": listing.error});
     save(&output.join("manifest.json"), &manifest)?;
-    if !listing.complete {
-        return Err("Listing incomplete; see listing.json. No conversations fetched.".into());
+    if listing.error.is_some() {
+        return Err(
+            "Inventory request failed; saved progress in listing.json. Resume later.".into(),
+        );
     }
     let mut index = fs::File::create(output.join("index.jsonl.tmp"))?;
     let mut segment_index = fs::File::create(output.join("segments.jsonl.tmp"))?;
@@ -289,7 +340,7 @@ fn export(
     )?;
     index.sync_all()?;
     fs::rename(output.join("index.jsonl.tmp"), output.join("index.jsonl"))?;
-    manifest["complete"] = json!(exported == speeches.len());
+    manifest["complete"] = json!(listing.complete && exported == speeches.len());
     save(&output.join("manifest.json"), &manifest)?;
     Ok(())
 }
@@ -297,6 +348,20 @@ fn export(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn resumed_listing_deduplicates_and_keeps_last_successful_cursor() {
+        let prior = json!({"speeches": [{"otid": "a"}], "last_load_ts": 100});
+        let mut next = json!({"speeches": [{"otid": "a"}, {"otid": "b"}], "last_load_ts": 50, "pagination": {"complete": false}});
+        merge_listing(&mut next, &prior);
+        assert_eq!(next["speeches"].as_array().unwrap().len(), 2);
+        assert_eq!(next["last_load_ts"], 50);
+        let mut failed = json!({"speeches": [], "pagination": {"complete": false}});
+        merge_listing(&mut failed, &next);
+        assert_eq!(failed["last_load_ts"], 50);
+        assert_eq!(failed["speeches"].as_array().unwrap().len(), 2);
+        assert_eq!(failed["pagination"]["complete"], false);
+    }
 
     #[test]
     fn recording_order_uses_title_dates_before_upload_dates() {
