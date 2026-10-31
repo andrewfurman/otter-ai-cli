@@ -45,8 +45,8 @@ def main():
                     wait = max(wait, latest['observed_at_unix_seconds'] + (latest.get('retry_after_seconds') or 90) - time.time())
             manifest_path = output / 'manifest.json'
             manifest = json.loads(manifest_path.read_text()) if manifest_path.exists() else {}
-            if result.returncode == 0 and manifest.get('complete'):
-                print('Archive snapshot complete; worker stopped.', file=log)
+            if result.returncode == 0 and (manifest.get('complete') or manifest.get('finished')):
+                print(f"Archive traversal finished; unavailable={manifest.get('unavailable', 0)}; complete={manifest.get('complete')}. Worker stopped.", file=log)
                 return
             # Retry read failures only on the hourly cadence, with a finite failure budget.
             if result.returncode != 0:

@@ -71,6 +71,16 @@ def publish(output, repository):
     date_range = f'{dates[0][:10]} to {dates[-1][:10]}' if dates else 'date unknown'
     manifest = {'schema_version': 1, 'count': len(docs), 'date_range': date_range,
                 'order': 'recorded_at_desc', 'otids': [doc['otid'] for _, doc in docs]}
+    progress_path = output / 'manifest.json'
+    if progress_path.exists():
+        progress = json.loads(progress_path.read_text())
+        manifest['inventory_complete'] = progress.get('listing_complete', False)
+        manifest['known_conversations'] = progress.get('total')
+    unavailable_path = output / 'unavailable.json'
+    if unavailable_path.exists():
+        unavailable = json.loads(unavailable_path.read_text())
+        manifest['unavailable_conversations'] = len(unavailable)
+        save(target / 'unavailable.json', unavailable)
     save(target / 'manifest.json', manifest)
     (target / 'README.md').write_text(
         f'# Otter transcript batch\n\n{len(docs)} conversations, {date_range}, newest first.\n\n'

@@ -191,6 +191,15 @@ fn export(
     let previous: Option<Value> = fs::read(&output.join("manifest.json"))
         .ok()
         .and_then(|b| serde_json::from_slice(&b).ok());
+    let unavailable_path = output.join("unavailable.json");
+    let mut unavailable: Value = if unavailable_path.exists() {
+        serde_json::from_slice(&fs::read(&unavailable_path)?)?
+    } else {
+        json!({})
+    };
+    if !unavailable.is_object() {
+        return Err("Invalid unavailable.json".into());
+    }
     let prior = if cached.exists() && previous.as_ref().is_some_and(|m| m["source"] == source) {
         Some(serde_json::from_slice::<Value>(&fs::read(&cached)?)?)
     } else {
@@ -206,6 +215,7 @@ fn export(
                     speech["otid"].as_str().is_some_and(|id| {
                         let name = id.bytes().map(|b| format!("{b:02x}")).collect::<String>();
                         !output.join(format!("conversations/{name}.json")).exists()
+                            && unavailable.get(id).is_none()
                     })
                 })
                 .count()
@@ -274,6 +284,9 @@ fn export(
         let name = id.bytes().map(|b| format!("{b:02x}")).collect::<String>();
         let relative = format!("conversations/{name}.json");
         let path = output.join(&relative);
+        if unavailable.get(id).is_some() && !path.exists() {
+            continue;
+        }
         if !path.exists() && fetched >= max_new {
             continue;
         }
@@ -293,8 +306,15 @@ fn export(
             }
             thread::sleep(Duration::from_secs(delay));
             let response = client.get_speech(id)?;
-            check_response(&response, "speech", output)?;
             fetched += 1;
+            if response.status == 404 {
+                unavailable[id] = json!({"otid": id, "title": speech["title"], "http_status": 404,
+                    "reason": "Otter did not return this conversation; not exported",
+                    "observed_at_unix_seconds": std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_secs()});
+                save(&unavailable_path, &unavailable)?;
+                return Ok(Value::Null);
+            }
+            check_response(&response, "speech", output)?;
             let doc = document(response.data);
             save(&path, &doc)?;
             Ok(doc)
@@ -307,6 +327,10 @@ fn export(
                 return Err(error);
             }
         };
+        if doc.is_null() {
+            eprintln!("Recorded unavailable conversation (HTTP 404)");
+            continue;
+        }
         let row = json!({"otid": id, "title": doc["title"], "created_at": doc["created_at"],
             "duration_seconds": doc["duration_seconds"], "speakers": doc["speakers"],
             "recorded_at_iso_utc": doc["recorded_at_iso_utc"], "recording_start_iso_utc": doc["recording_start_iso_utc"], "created_at_iso_utc": doc["created_at_iso_utc"],
@@ -328,7 +352,7 @@ fn export(
         manifest["exported"] = json!(exported);
         save(&output.join("manifest.json"), &manifest)?;
         eprintln!(
-            "Exported {}/{} ({fetched} new this run)",
+            "Exported {}/{} ({fetched} detail requests this run)",
             exported,
             speeches.len()
         );
@@ -340,6 +364,17 @@ fn export(
     )?;
     index.sync_all()?;
     fs::rename(output.join("index.jsonl.tmp"), output.join("index.jsonl"))?;
+    let unavailable_count = speeches
+        .iter()
+        .filter(|speech| {
+            speech["otid"]
+                .as_str()
+                .is_some_and(|id| unavailable.get(id).is_some())
+        })
+        .count();
+    manifest["unavailable"] = json!(unavailable_count);
+    manifest["finished"] =
+        json!(listing.complete && exported + unavailable_count == speeches.len());
     manifest["complete"] = json!(listing.complete && exported == speeches.len());
     save(&output.join("manifest.json"), &manifest)?;
     Ok(())
