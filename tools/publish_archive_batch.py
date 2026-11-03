@@ -1,8 +1,8 @@
 """Publish exported conversations in independent, resumable archive pull requests."""
 from datetime import datetime, timezone
 import json
+import gzip
 from pathlib import Path
-import shutil
 import subprocess
 
 REPOSITORY = 'andrewfurman/Legacy-Notes-Archive'
@@ -18,14 +18,29 @@ def save(path, value):
     temporary.replace(path)
 
 
-def publish(output, repository):
+def read_document(path):
+    if path.name.endswith('.gz'):
+        with gzip.open(path, 'rt') as stream:
+            return json.load(stream)
+    return json.loads(path.read_text())
+
+
+def publish(output, repository, sparse=False):
     state_path = output / 'pull-requests.json'
     state = json.loads(state_path.read_text()) if state_path.exists() else {'published_otids': [], 'pull_requests': []}
     if 'pending' not in state:
         published = set(state['published_otids'])
         docs = []
-        for path in (output / 'conversations').glob('*.json'):
-            doc = json.loads(path.read_text())
+        for path in (output / 'conversations').glob('*.json*'):
+            if not (path.name.endswith('.json') or path.name.endswith('.json.gz')):
+                continue
+            try:
+                filename_id = bytes.fromhex(path.name.removesuffix('.gz').removesuffix('.json')).decode()
+            except (ValueError, UnicodeError):
+                filename_id = None
+            if filename_id in published:
+                continue
+            doc = read_document(path)
             if doc['otid'] not in published:
                 docs.append((path, doc))
         docs.sort(key=lambda pair: (-(pair[1].get('recorded_at_unix_seconds') or 0), pair[1]['otid']))
@@ -41,6 +56,8 @@ def publish(output, repository):
         # Persist intent before any network write for idempotent recovery.
         state['pending'] = {'branch': branch, 'directory': relative, 'files': [str(p) for p, _ in docs]}
         save(state_path, state)
+        if sparse:
+            command('git', 'sparse-checkout', 'set', '--cone', relative, cwd=repository)
         command('git', 'switch', '-c', branch, 'origin/main', cwd=repository)
     pending = state['pending']
     branch = pending['branch']
@@ -52,14 +69,15 @@ def publish(output, repository):
     docs = []
     for filename in pending['files']:
         source = Path(filename)
-        doc = json.loads(source.read_text())
+        doc = read_document(source)
         if not isinstance(doc.get('segments'), list) or not isinstance(doc.get('text'), str):
             raise RuntimeError('Invalid conversation export')
-        shutil.copyfile(source, target / 'conversations' / source.name)
+        destination = target / 'conversations' / source.name.removesuffix('.gz')
+        destination.write_text(json.dumps(doc, indent=2, ensure_ascii=False) + '\n')
         docs.append((source, doc))
     with (target / 'index.jsonl').open('w') as index, (target / 'segments.jsonl').open('w') as segments:
         for source, doc in docs:
-            relative_path = f'conversations/{source.name}'
+            relative_path = f"conversations/{source.name.removesuffix('.gz')}"
             row = {key: doc.get(key) for key in ['otid', 'title', 'recorded_at_iso_utc', 'recorded_at_source', 'created_at_iso_utc', 'duration_seconds', 'speakers', 'text']}
             row['path'] = relative_path
             index.write(json.dumps(row, ensure_ascii=False) + '\n')

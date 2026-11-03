@@ -4,6 +4,7 @@ import argparse
 import json
 from pathlib import Path
 import subprocess
+import shutil
 import time
 
 from publish_archive_batch import publish
@@ -15,9 +16,11 @@ def main():
     parser.add_argument('--notes-repo', type=Path, required=True)
     parser.add_argument('--initial-delay-seconds', type=int, default=0)
     parser.add_argument('--interval-seconds', type=int, default=600)
+    parser.add_argument('--min-free-mib', type=int, default=1536)
+    parser.add_argument('--sparse-checkout', action=argparse.BooleanOptionalAction, default=True)
     args = parser.parse_args()
-    if args.interval_seconds < 1 or args.initial_delay_seconds < 0:
-        parser.error('interval must be positive and initial delay must be nonnegative')
+    if args.interval_seconds < 1 or args.initial_delay_seconds < 0 or args.min_free_mib < 1:
+        parser.error('interval and minimum free space must be positive; initial delay must be nonnegative')
     project = Path(__file__).resolve().parents[1]
     output = args.output.resolve()
     output.mkdir(parents=True, exist_ok=True)
@@ -29,14 +32,19 @@ def main():
             time.sleep(args.initial_delay_seconds)
         consecutive_failures = 0
         while True:
+            # Preserve a reserve for publication, index replacement and checkpoints.
+            if shutil.disk_usage(output).free < args.min_free_mib * 1024**2:
+                raise SystemExit(f'Export paused: less than {args.min_free_mib} MiB free; saved exports and publication state preserved')
             # Recover a previously interrupted PR publication before more API requests.
-            publish(output, repository)
+            publish(output, repository, sparse=args.sparse_checkout)
+            if shutil.disk_usage(output).free < args.min_free_mib * 1024**2:
+                raise SystemExit(f'Export paused: less than {args.min_free_mib} MiB free; saved exports and publication state preserved')
             print(f'Batch started at {int(time.time())}', file=log)
             result = subprocess.run([
-                str(project / 'target/debug/otter'), 'speeches', 'export-json', str(output),
+                str(project / 'bin/otter'), 'speeches', 'export-json', str(output),
                 '--source', 'all', '--delay', '10', '--max-new', '25',
             ], stdout=log, stderr=log)
-            publish(output, repository)
+            publish(output, repository, sparse=args.sparse_checkout)
             rate_file = output / 'rate-limits.jsonl'
             wait = args.interval_seconds
             if rate_file.exists():

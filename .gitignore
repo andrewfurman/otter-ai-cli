@@ -3,3 +3,6 @@
 
 # Python worker bytecode
 __pycache__/
+
+# Installed local worker binary
+/bin/

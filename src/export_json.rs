@@ -3,6 +3,7 @@ use std::{
     fs,
     io::Write,
     path::{Path, PathBuf},
+    process::{Command, Stdio},
     thread,
     time::Duration,
 };
@@ -16,6 +17,58 @@ fn save(path: &Path, data: &Value) -> Result<(), Box<dyn std::error::Error>> {
     let temp = path.with_extension("json.tmp");
     fs::write(&temp, serde_json::to_vec_pretty(data)?)?;
     fs::rename(temp, path)?;
+    Ok(())
+}
+
+fn conversation_path(output: &Path, id: &str) -> PathBuf {
+    let name = id.bytes().map(|b| format!("{b:02x}")).collect::<String>();
+    let legacy = output.join(format!("conversations/{name}.json"));
+    let compressed = output.join(format!("conversations/{name}.json.gz"));
+    if legacy.exists() && !compressed.exists() {
+        legacy
+    } else {
+        compressed
+    }
+}
+
+fn read_document(path: &Path) -> Result<Value, Box<dyn std::error::Error>> {
+    let bytes = if path.extension().is_some_and(|extension| extension == "gz") {
+        let result = Command::new("gzip")
+            .arg("-dc")
+            .arg("--")
+            .arg(path)
+            .output()?;
+        if !result.status.success() {
+            return Err("Cannot decompress saved conversation".into());
+        }
+        result.stdout
+    } else {
+        fs::read(path)?
+    };
+    Ok(serde_json::from_slice(&bytes)?)
+}
+
+fn save_document(path: &Path, doc: &Value) -> Result<(), Box<dyn std::error::Error>> {
+    if path.extension().is_none_or(|extension| extension != "gz") {
+        return save(path, doc);
+    }
+    let temporary = path.with_extension("gz.tmp");
+    let file = fs::File::create(&temporary)?;
+    let mut child = Command::new("gzip")
+        .args(["-c", "-3"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::from(file))
+        .spawn()?;
+    let bytes = serde_json::to_vec(doc)?;
+    let mut input = child.stdin.take().ok_or("Missing compressor input")?;
+    let written = input.write_all(&bytes);
+    drop(input);
+    let status = child.wait()?;
+    written?;
+    if !status.success() {
+        return Err("Conversation compression failed".into());
+    }
+    fs::rename(temporary, path)?;
     Ok(())
 }
 
@@ -213,9 +266,7 @@ fn export(
                 .iter()
                 .filter(|speech| {
                     speech["otid"].as_str().is_some_and(|id| {
-                        let name = id.bytes().map(|b| format!("{b:02x}")).collect::<String>();
-                        !output.join(format!("conversations/{name}.json")).exists()
-                            && unavailable.get(id).is_none()
+                        !conversation_path(output, id).exists() && unavailable.get(id).is_none()
                     })
                 })
                 .count()
@@ -281,9 +332,8 @@ fn export(
     for speech in &speeches {
         let id = speech["otid"].as_str().ok_or("Missing OTID")?;
         // Encode every byte to avoid filesystem traversal and name collisions.
-        let name = id.bytes().map(|b| format!("{b:02x}")).collect::<String>();
-        let relative = format!("conversations/{name}.json");
-        let path = output.join(&relative);
+        let path = conversation_path(output, id);
+        let relative = path.strip_prefix(output)?.to_string_lossy().into_owned();
         if unavailable.get(id).is_some() && !path.exists() {
             continue;
         }
@@ -292,7 +342,7 @@ fn export(
         }
         let result = (|| -> Result<Value, Box<dyn std::error::Error>> {
             if path.exists() {
-                let doc: Value = serde_json::from_slice(&fs::read(&path)?)?;
+                let doc = read_document(&path)?;
                 if doc["otid"] != id
                     || doc["schema_version"] != 1
                     || !doc["segments"].is_array()
@@ -316,7 +366,7 @@ fn export(
             }
             check_response(&response, "speech", output)?;
             let doc = document(response.data);
-            save(&path, &doc)?;
+            save_document(&path, &doc)?;
             Ok(doc)
         })();
         let doc = match result {
@@ -383,6 +433,22 @@ fn export(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn compressed_documents_round_trip_and_keep_legacy_files_readable() {
+        let directory = tempfile::tempdir().unwrap();
+        fs::create_dir(directory.path().join("conversations")).unwrap();
+        let doc = json!({"otid": "a", "text": "Unicode café", "segments": [{"start_ms": 12}]});
+        let path = conversation_path(directory.path(), "a");
+        assert_eq!(path.extension().unwrap(), "gz");
+        save_document(&path, &doc).unwrap();
+        assert_eq!(read_document(&path).unwrap(), doc);
+        assert!(!path.with_extension("gz.tmp").exists());
+        let legacy = directory.path().join("conversations/62.json");
+        save(&legacy, &doc).unwrap();
+        assert_eq!(conversation_path(directory.path(), "b"), legacy);
+        assert_eq!(read_document(&legacy).unwrap(), doc);
+    }
 
     #[test]
     fn resumed_listing_deduplicates_and_keeps_last_successful_cursor() {

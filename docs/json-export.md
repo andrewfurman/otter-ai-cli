@@ -55,3 +55,22 @@ The first inventory run returned 22 successful pages and 2,205 unique conversati
 The first transcript batch exported seven conversations before another listed conversation returned HTTP 404. This was not a rate limit. HTTP 404 details are now recorded in `OUTPUT/unavailable.json` and those IDs are skipped on later runs so they do not block older recordings. Subsequent batch PRs include the unavailable-conversation register and inventory completeness. `manifest.finished` means traversal ended, potentially with unavailable recordings; `manifest.complete` is true only when every discovered conversation was exported. Restore access and remove the relevant unavailable entry to retry it. Other HTTP errors still stop the batch and retain completed files.
 
 The default interval is 600 seconds after a batch finishes (configurable with `--interval-seconds`). Request spacing remains ten seconds and each invocation attempts at most 25 new conversation details, including HTTP 404 responses. Longer server-provided retry delays override the configured interval. This is an operating preference, not a measured rate quota.
+
+## Compact local storage and recovery
+
+The VM ran out of disk space on 2026-11-01 after saving 2,501 conversations, with 23 not yet submitted. This was a storage failure, not the end of Otter history. Recovery compresses local working copies as `conversations/HEX_OTID.json.gz`; `tools/compact_local_archive.py OUTPUT` verifies the complete original bytes before replacing each plain local copy. Re-running compaction is safe; a differing existing compressed file preserves the original and stops with an error. The exporter can read legacy `.json` files and new `.json.gz` files, and new exports are compressed automatically.
+
+The publisher reads either format and always writes ordinary `.json` documents into the notes repository, preserving existing schemas, speaker/timestamp indexes and per-batch pull requests. Filename-based deduplication avoids decompressing previously submitted documents on every publication run. Cumulative local indexes point to the compressed working copies after the next successful export; repository indexes continue to point to plain JSON.
+
+Build the worker binary outside the disposable build cache:
+
+```bash
+cargo build --release
+mkdir -p bin
+install -m 755 target/release/otter bin/otter
+python3 tools/export_over_time.py OUTPUT --notes-repo /path/to/Legacy-Notes-Archive --interval-seconds 600
+```
+
+`bin/` is ignored by Git. The worker pauses before publication or exporting if free disk space falls below 1,536 MiB (`--min-free-mib`), leaving conversation files and publication state intact. Keep the binary when cleaning build artifacts. No historical cutoff is applied: discovery resumes from the last saved cursor and continues until Otter returns `end_of_list=true`. A pre-2024 check on 2026-11-03 confirmed 25 records created in 2023, including August 24, and additional older pages. This sample does not establish the total number of 2020–2024 conversations.
+
+The worker also uses sparse checkout in its dedicated notes publishing checkout: only the current batch directory and parent/root files are materialized. All committed transcripts remain in Git history and on GitHub; no archive content is deleted or rewritten. `--no-sparse-checkout` disables this for a separate checkout with adequate space. To materialize the full archive manually, run `git sparse-checkout disable` in the notes checkout after ensuring enough disk space. This avoids holding a second full plain-text copy of every merged transcript on the VM.

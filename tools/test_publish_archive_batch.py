@@ -1,6 +1,7 @@
 import contextlib
 import io
 import json
+import gzip
 from pathlib import Path
 import subprocess
 import tempfile
@@ -30,7 +31,10 @@ class BatchPublicationTest(unittest.TestCase):
                 doc = {'otid': str(i), 'title': 'Call', 'recorded_at_unix_seconds': i + 1,
                        'recorded_at_iso_utc': f'2026-10-0{i+1}T00:00:00+00:00', 'text': 'hello',
                        'segments': [{'text': 'hello', 'speaker_name': 'Alice', 'start_ms': 1000, 'raw_segment': {}}]}
-                (output / 'conversations' / f'{i}.json').write_text(json.dumps(doc))
+                if i == 1:
+                    (output / 'conversations' / f'{i}.json.gz').write_bytes(gzip.compress(json.dumps(doc).encode()))
+                else:
+                    (output / 'conversations' / f'{i}.json').write_text(json.dumps(doc))
             creates = []
 
             def command(*args, cwd=None):
@@ -42,8 +46,8 @@ class BatchPublicationTest(unittest.TestCase):
                 return real_command(*args, cwd=cwd)
 
             with patch.object(publisher, 'command', command), contextlib.redirect_stdout(io.StringIO()):
-                publisher.publish(output, checkout)
-                publisher.publish(output, checkout)
+                publisher.publish(output, checkout, sparse=True)
+                publisher.publish(output, checkout, sparse=True)
             self.assertEqual(len(creates), 1)
             state = json.loads((output / 'pull-requests.json').read_text())
             self.assertEqual(state['published_otids'], ['0', '1'])
@@ -51,6 +55,8 @@ class BatchPublicationTest(unittest.TestCase):
             batch = next((checkout / 'Legacy Otter Transcripts/batches').iterdir())
             rows = [json.loads(line) for line in (batch / 'index.jsonl').read_text().splitlines()]
             self.assertEqual([row['otid'] for row in rows], ['1', '0'])
+            self.assertEqual(len(list((batch / 'conversations').glob('*.json'))), 2)
+            self.assertEqual(len(list((batch / 'conversations').glob('*.gz'))), 0)
             for row in rows:
                 self.assertTrue((batch / row['path']).is_file())
             segments = [json.loads(line) for line in (batch / 'segments.jsonl').read_text().splitlines()]
