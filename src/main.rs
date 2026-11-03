@@ -1,6 +1,7 @@
 mod ask;
 mod auth;
 mod batch_rename;
+mod export_json;
 mod folders;
 mod groups;
 mod pagination;
@@ -130,6 +131,19 @@ enum Command {
 
 #[derive(Subcommand)]
 enum SpeechesCommand {
+    /// Archive conversations as structured JSON, resuming existing exports
+    ExportJson {
+        /// Destination directory (one JSON per OTID plus index.jsonl)
+        output: std::path::PathBuf,
+        #[arg(long, default_value = "all", value_parser = ["owned", "shared", "all"])]
+        source: String,
+        /// Seconds between requests
+        #[arg(long, default_value_t = 10, value_parser = clap::value_parser!(u64).range(1..))]
+        delay: u64,
+        /// Maximum new conversations per invocation; existing files are reused
+        #[arg(long, default_value_t = 25, value_parser = clap::value_parser!(u32).range(1..))]
+        max_new: u32,
+    },
     /// List speeches; --days paginates its date window, --all fetches every page
     List {
         /// Folder ID or name (default: 0 = all)
@@ -356,6 +370,12 @@ fn main() {
         Command::Logout => auth::logout(),
         Command::User => auth::user(),
         Command::Speeches(command) => match command {
+            SpeechesCommand::ExportJson {
+                output,
+                source,
+                delay,
+                max_new,
+            } => export_json::run(output, source, delay, max_new),
             SpeechesCommand::List {
                 folder,
                 page_size,

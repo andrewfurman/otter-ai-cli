@@ -114,6 +114,10 @@ Pass move OTIDs as separate arguments. The CLI removes duplicates and sends one 
 
 Uploads stream the audio file, and downloads stream into a temporary file beside the destination. A download replaces the destination only after the complete HTTP 200 export arrives. HTTP errors, partial responses, and interrupted transfers leave an existing destination unchanged. Temporary files are removed on handled failures. Export errors preserve server retry guidance, including non-JSON rate-limit responses.
 
+## Structured JSON export
+
+Use `otter speeches export-json OUTPUT --delay 10 --max-new 25` for resumable batches with speaker names and timestamps. See [the JSON archive guide](docs/json-export.md) for the schema, search examples, scheduled worker and rate-limit evidence.
+
 ## Ask Otter's AI Chat
 
 Ask Otter's built-in AI Chat across all your conversations:
