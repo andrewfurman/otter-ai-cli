@@ -26,7 +26,7 @@ otter speeches list --days 2
 otter search Disney --speaker "Kate Furman" --from 2026-09-21 --to 2026-09-24
 ```
 
-Most read commands take `--json` for scripts and agents; `speakers tag --json` also returns a batch result. `speeches list` and `speeches search` accept `--speaker` to filter by speaker name or id. `otter --help` and `otter help` show every command and rate-limit guidance. Use `otter <group> --help` or `otter help <group> <command>` for arguments and examples.
+Most read commands take `--json` for scripts and agents; `speakers tag --json` also returns a batch result. `speeches list` and `speeches search` accept `--speaker` to filter by speaker name or id. See [Getting help](#getting-help) for how to find arguments and examples.
 
 Speaker-filtered searches, transcript display, and tagging previews resolve segment speaker IDs through the conversation's speaker list, including numeric and string IDs. Names match case-insensitive substrings; IDs match exactly. If no name is available in that list, an embedded segment name is used when present. This lookup uses the fetched conversation and adds no API requests. `speeches get --json` preserves the raw API response.
 
@@ -65,6 +65,31 @@ Use this only with an Otter account you are allowed to access, and follow [Otter
 | `otter ask "QUESTION"` | Ask Otter's AI Chat across all your conversations; prints the answer (optionally `--json`, `--timeout SECS`, `--debug`) |
 
 Run any command with `--help` for all its flags. Help does not authenticate or contact Otter. The top-level help inventory is generated from the command definitions so new commands appear automatically.
+
+### Getting help
+
+Every command documents every flag and ends with copy-pasteable examples. `-h`, `--help` and `help` print the same text, and help never logs in or contacts Otter.
+
+```bash
+otter --help                    # all commands, grouped, with common examples
+otter help speeches list        # one command: every flag plus examples
+otter speakers tag --help       # same thing
+```
+
+Mistakes (a missing argument, an unknown command) print a short error plus a pointer to `otter help <command>`. Common tasks:
+
+```bash
+otter login
+otter speeches list --days 7
+otter search "budget review" --from 2026-01-01 --to 2026-01-31
+otter search --speaker "Jane Doe" --days 30 --json
+otter speeches get a1B2c3D4e5F6g7H8
+otter speeches download a1B2c3D4e5F6g7H8 --format txt,srt --output meeting.zip
+otter speeches rename-batch plan.json --dry-run
+otter ask "What did we decide about the Fabrikam contract?"
+```
+
+Commands that change data say so in their help; `speeches trash` asks to confirm (`--yes` skips) and `speakers untag --all` requires `--yes`. A test fails if any flag lacks help text or any command lacks an Examples section.
 
 ### Archive search
 

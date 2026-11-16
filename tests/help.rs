@@ -55,6 +55,73 @@ fn both_root_help_forms_show_every_command_and_rate_guidance() {
 }
 
 #[test]
+fn top_level_help_is_identical_for_every_form_and_has_examples() {
+    let forms = [&["--help"][..], &["-h"][..], &["help"][..]];
+    let texts: Vec<String> = forms.iter().map(|args| help(args)).collect();
+    assert!(texts.iter().all(|t| *t == texts[0]));
+    let text = &texts[0];
+    for needle in [
+        "otter login",
+        "Examples:",
+        "More help:",
+        "Safety:",
+        "--json",
+        "Sign in & settings:",
+        "Read (never changes anything):",
+        "Change (",
+    ] {
+        assert!(text.contains(needle), "missing {needle}");
+    }
+    assert!(
+        !text.contains("\nCommands:\n"),
+        "command list is duplicated"
+    );
+    assert!(
+        !text.contains("Other:"),
+        "ungrouped command in top-level help"
+    );
+    assert!(
+        text.lines().count() <= 70,
+        "top-level help should fit a screen"
+    );
+}
+
+#[test]
+fn short_and_long_help_match_for_subcommands() {
+    for path in [
+        &["search"][..],
+        &["speeches", "list"][..],
+        &["speakers", "tag"][..],
+    ] {
+        let mut short: Vec<&str> = path.to_vec();
+        short.push("-h");
+        let mut long: Vec<&str> = path.to_vec();
+        long.push("--help");
+        let mut via_help: Vec<&str> = vec!["help"];
+        via_help.extend(path);
+        assert_eq!(help(&short), help(&long));
+        assert_eq!(help(&long), help(&via_help));
+    }
+}
+
+#[test]
+fn mistakes_point_to_help_and_keep_exit_code_2() {
+    for args in [
+        &["search", "--bogus"][..],
+        &["nonsense"][..],
+        &["speeches", "get"][..],
+    ] {
+        let output = Command::new(env!("CARGO_BIN_EXE_otter"))
+            .args(args)
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(2), "{args:?}");
+        let error = String::from_utf8(output.stderr).unwrap();
+        assert!(error.contains("otter help <command>"), "{args:?}: {error}");
+    }
+}
+
+#[test]
 fn nested_tag_help_explains_batching_and_all_scope() {
     for args in [
         &["speakers", "tag", "--help"][..],
@@ -73,8 +140,8 @@ fn listing_move_and_export_help_describe_their_limits() {
     let list = help(&["speeches", "list", "--help"]);
     assert!(list.contains("--all"));
     assert!(list.contains("--max-pages"));
-    assert!(list.contains("complete last N days"));
-    assert!(list.contains("before filtering"));
+    assert!(list.contains("last N days"));
+    assert!(list.contains("one page"));
     let download = help(&["speeches", "download", "--help"]);
     assert!(download.contains("Exact output path"));
     assert!(download.contains("OTID.zip"));
@@ -124,8 +191,8 @@ fn batch_rename_help_explains_preview_conflicts_and_verification() {
         "old_title",
         "new_title",
         "--dry-run",
-        "preview offline",
-        "already-correct",
+        "works offline",
+        "already correct",
         "verifies each save",
         "unattempted",
     ] {
